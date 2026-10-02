@@ -29,7 +29,7 @@ dp = Dispatcher()
 
 
 # =========================
-# FSM
+# STATES
 # =========================
 
 class StarAmountState(StatesGroup):
@@ -51,24 +51,6 @@ class SellState(StatesGroup):
 
 def usd_to_kgs(amount: float) -> float:
     return round(amount * USD_TO_KGS, 2)
-
-
-def get_username(message: Message) -> str:
-    if message.from_user.username:
-        return f"@{message.from_user.username}"
-    return ""
-
-
-def get_name(message: Message) -> str:
-    if message.from_user.username:
-        return f"@{message.from_user.username}"
-
-    full_name = message.from_user.full_name
-
-    if full_name:
-        return full_name
-
-    return "пользователь"
 
 
 def main_menu():
@@ -99,7 +81,10 @@ def stars_amount_keyboard(prefix: str):
     kb.button(text="500 ⭐️", callback_data=f"{prefix}_500")
     kb.button(text="1000 ⭐️", callback_data=f"{prefix}_1000")
     kb.button(text="2000 ⭐️", callback_data=f"{prefix}_2000")
-    kb.button(text="✏️ Другое количество", callback_data=f"{prefix}_custom")
+    kb.button(
+        text="✏️ Другое количество",
+        callback_data=f"{prefix}_custom"
+    )
     kb.button(text="◀️ Назад", callback_data="back_main")
 
     kb.adjust(2, 2, 1, 1)
@@ -111,7 +96,7 @@ def admin_order_keyboard(order_id: int):
     kb = InlineKeyboardBuilder()
 
     kb.button(
-        text="✅ Заказ выполнен",
+        text="✅ Подтвердить",
         callback_data=f"admin_done_{order_id}"
     )
 
@@ -162,7 +147,10 @@ async def start_handler(message: Message, state: FSMContext):
 # =========================
 
 @dp.callback_query(F.data == "back_main")
-async def back_main(callback: CallbackQuery, state: FSMContext):
+async def back_main(
+    callback: CallbackQuery,
+    state: FSMContext
+):
     await state.clear()
 
     if callback.from_user.username:
@@ -191,9 +179,9 @@ async def back_main(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-# =========================
+# ============================================================
 # BUY STARS
-# =========================
+# ============================================================
 
 @dp.callback_query(F.data == "buy_stars")
 async def buy_stars(callback: CallbackQuery):
@@ -201,10 +189,10 @@ async def buy_stars(callback: CallbackQuery):
     price_100_kgs = usd_to_kgs(price_100_usd)
 
     text = (
-        "⭐️ Покупка Stars\n\n"
+        "⭐️ Купить Stars\n\n"
         f"Курс: 100 ⭐️ = {price_100_usd:.2f}$ "
         f"({price_100_kgs:.2f} сом)\n\n"
-        f"Минимальная покупка: {MIN_STARS} ⭐️\n\n"
+        f"Минимальная покупка — {MIN_STARS} ⭐️\n\n"
         "Выберите количество:"
     )
 
@@ -217,8 +205,13 @@ async def buy_stars(callback: CallbackQuery):
 
 
 @dp.callback_query(F.data == "buy_custom")
-async def buy_custom(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(StarAmountState.waiting_buy_amount)
+async def buy_custom(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    await state.set_state(
+        StarAmountState.waiting_buy_amount
+    )
 
     await callback.message.edit_text(
         f"✏️ Введите количество Stars.\n\n"
@@ -230,13 +223,16 @@ async def buy_custom(callback: CallbackQuery, state: FSMContext):
 
 
 @dp.message(StarAmountState.waiting_buy_amount)
-async def buy_custom_amount(message: Message, state: FSMContext):
+async def buy_custom_amount(
+    message: Message,
+    state: FSMContext
+):
     try:
         amount = int(message.text.strip())
     except (ValueError, AttributeError):
         await message.answer(
-            "❌ Введите количество только цифрами.\n"
-            f"Например: 350"
+            "❌ Введите количество только цифрами.\n\n"
+            "Например: 350"
         )
         return
 
@@ -246,71 +242,22 @@ async def buy_custom_amount(message: Message, state: FSMContext):
         )
         return
 
-    await state.clear()
+    if not message.from_user.username:
+        await state.clear()
 
+        await message.answer(
+            "⚠️ Для покупки Stars необходимо установить "
+            "username в Telegram.\n\n"
+            "После установки username снова нажмите "
+            "«Купить Stars».",
+            reply_markup=main_menu()
+        )
+        return
+
+    await state.clear()
     await create_buy_order(message, amount)
 
 
-async def create_buy_order(message: Message, amount: int):
-    price_usd = amount / 100 * STARS_BUY_RATE_USD
-    price_kgs = usd_to_kgs(price_usd)
-
-    username = (
-        message.from_user.username
-        if message.from_user.username
-        else "без username"
-    )
-
-    order_id = await create_order(
-        telegram_id=message.from_user.id,
-        username=username,
-        order_type="BUY_STARS",
-        amount=str(amount),
-        price=price_usd,
-    )
-
-    text = (
-        f"⭐️ Покупка {amount} Stars\n\n"
-        f"💵 Сумма: {price_usd:.2f}$\n"
-        f"🇰🇬 Сумма: {price_kgs:.2f} сом\n\n"
-        "⚠️ ВАЖНО:\n"
-        "Оплатить надо полную сумму !!\n"
-        "Возврата денег не подлежит, будьте внимательны.\n\n"
-        f"📦 Заказ №{order_id}\n\n"
-        "💳 Реквизиты для оплаты будут отправлены "
-        "администратором.\n\n"
-        "После оплаты нажмите кнопку ниже."
-    )
-
-    kb = InlineKeyboardBuilder()
-    kb.button(
-        text="✅ Я оплатил",
-        callback_data=f"paid_{order_id}"
-    )
-    kb.button(
-        text="◀️ Назад",
-        callback_data="back_main"
-    )
-    kb.adjust(1, 1)
-
-    await message.answer(
-        text,
-        reply_markup=kb.as_markup()
-    )
-
-    await notify_admin_new_order(
-        message.bot,
-        order_id,
-        message.from_user.id,
-        username,
-        "⭐️ Покупка Stars",
-        f"{amount} Stars",
-        price_usd,
-        price_kgs,
-    )
-
-
-# Fixed BUY buttons
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy_fixed(callback: CallbackQuery):
     value = callback.data.replace("buy_", "")
@@ -341,14 +288,85 @@ async def buy_fixed(callback: CallbackQuery):
         await callback.answer()
         return
 
-    await create_buy_order(callback.message, amount)
+    await create_buy_order(
+        callback.message,
+        amount
+    )
 
     await callback.answer()
 
 
-# =========================
+async def create_buy_order(
+    message: Message,
+    amount: int
+):
+    price_usd = (
+        amount / 100
+    ) * STARS_BUY_RATE_USD
+
+    price_kgs = usd_to_kgs(price_usd)
+
+    username = (
+        message.from_user.username
+        if message.from_user.username
+        else "без username"
+    )
+
+    order_id = await create_order(
+        telegram_id=message.from_user.id,
+        username=username,
+        order_type="BUY_STARS",
+        amount=str(amount),
+        price=price_usd,
+    )
+
+    text = (
+        f"⭐️ Покупка {amount} Stars\n\n"
+        f"💵 Сумма: {price_usd:.2f}$\n"
+        f"🇰🇬 Сумма: {price_kgs:.2f} сом\n\n"
+        "⚠️ ВАЖНО:\n"
+        "Оплатить надо полную сумму !!\n"
+        "Возврата денег не подлежит, будьте внимательны.\n\n"
+        f"📦 Заказ №{order_id}\n\n"
+        "💳 Этап оплаты\n"
+        "Реквизиты для оплаты будут добавлены позже.\n\n"
+        "После оплаты нажмите кнопку ниже."
+    )
+
+    kb = InlineKeyboardBuilder()
+
+    kb.button(
+        text="✅ Я оплатил",
+        callback_data=f"paid_{order_id}"
+    )
+
+    kb.button(
+        text="◀️ Назад",
+        callback_data="back_main"
+    )
+
+    kb.adjust(1, 1)
+
+    await message.answer(
+        text,
+        reply_markup=kb.as_markup()
+    )
+
+    await notify_admin_new_order(
+        message.bot,
+        order_id,
+        message.from_user.id,
+        username,
+        "⭐️ Покупка Stars",
+        f"{amount} Stars",
+        price_usd,
+        price_kgs,
+    )
+
+
+# ============================================================
 # SELL STARS
-# =========================
+# ============================================================
 
 @dp.callback_query(F.data == "sell_stars")
 async def sell_stars(callback: CallbackQuery):
@@ -356,11 +374,11 @@ async def sell_stars(callback: CallbackQuery):
     price_100_kgs = usd_to_kgs(price_100_usd)
 
     text = (
-        "💰 Продажа Stars\n\n"
+        "💰 Продать Stars\n\n"
         f"Курс: 100 ⭐️ = {price_100_usd:.2f}$ "
         f"({price_100_kgs:.2f} сом)\n\n"
-        f"Минимальная продажа: {MIN_STARS} ⭐️\n\n"
-        "⚠️ Перед продажей обязательно отправьте "
+        f"Минимальная продажа — {MIN_STARS} ⭐️\n\n"
+        "⚠️ Перед продажей обязательно подготовьте "
         "скриншот, где видно, откуда были куплены Stars.\n\n"
         "Выберите количество:"
     )
@@ -374,8 +392,13 @@ async def sell_stars(callback: CallbackQuery):
 
 
 @dp.callback_query(F.data == "sell_custom")
-async def sell_custom(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(StarAmountState.waiting_sell_amount)
+async def sell_custom(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    await state.set_state(
+        StarAmountState.waiting_sell_amount
+    )
 
     await callback.message.edit_text(
         f"✏️ Введите количество Stars для продажи.\n\n"
@@ -387,12 +410,16 @@ async def sell_custom(callback: CallbackQuery, state: FSMContext):
 
 
 @dp.message(StarAmountState.waiting_sell_amount)
-async def sell_custom_amount(message: Message, state: FSMContext):
+async def sell_custom_amount(
+    message: Message,
+    state: FSMContext
+):
     try:
         amount = int(message.text.strip())
     except (ValueError, AttributeError):
         await message.answer(
-            "❌ Введите количество только цифрами."
+            "❌ Введите количество только цифрами.\n\n"
+            "Например: 350"
         )
         return
 
@@ -404,7 +431,10 @@ async def sell_custom_amount(message: Message, state: FSMContext):
 
     await state.clear()
 
-    await ask_sell_bank(message, amount)
+    await ask_sell_bank(
+        message,
+        amount
+    )
 
 
 @dp.callback_query(F.data.startswith("sell_"))
@@ -426,13 +456,22 @@ async def sell_fixed(callback: CallbackQuery):
         )
         return
 
-    await ask_sell_bank(callback.message, amount)
+    await ask_sell_bank(
+        callback.message,
+        amount
+    )
 
     await callback.answer()
 
 
-async def ask_sell_bank(message: Message, amount: int):
-    price_usd = amount / 100 * STARS_SELL_RATE_USD
+async def ask_sell_bank(
+    message: Message,
+    amount: int
+):
+    price_usd = (
+        amount / 100
+    ) * STARS_SELL_RATE_USD
+
     price_kgs = usd_to_kgs(price_usd)
 
     kb = InlineKeyboardBuilder()
@@ -458,7 +497,7 @@ async def ask_sell_bank(message: Message, amount: int):
         f"💰 Продажа {amount} Stars\n\n"
         f"💵 Вы получите: {price_usd:.2f}$\n"
         f"🇰🇬 Вы получите: {price_kgs:.2f} сом\n\n"
-        "Выберите банк для получения выплаты:\n\n"
+        "🏦 Выберите банк для получения выплаты.\n\n"
         "После выбора банка отправляйте только QR-код."
     )
 
@@ -469,11 +508,29 @@ async def ask_sell_bank(message: Message, amount: int):
 
 
 @dp.callback_query(F.data.startswith("sellbank_"))
-async def sell_bank(callback: CallbackQuery, state: FSMContext):
+async def sell_bank(
+    callback: CallbackQuery,
+    state: FSMContext
+):
     parts = callback.data.split("_")
 
+    if len(parts) != 3:
+        await callback.answer(
+            "Ошибка.",
+            show_alert=True
+        )
+        return
+
     bank = parts[1]
-    amount = int(parts[2])
+
+    try:
+        amount = int(parts[2])
+    except ValueError:
+        await callback.answer(
+            "Ошибка количества.",
+            show_alert=True
+        )
+        return
 
     bank_name = (
         "MBank"
@@ -486,23 +543,29 @@ async def sell_bank(callback: CallbackQuery, state: FSMContext):
         sell_bank=bank_name
     )
 
-    await state.set_state(SellState.waiting_qr)
+    await state.set_state(
+        SellState.waiting_qr
+    )
 
     await callback.message.edit_text(
         f"🏦 Банк: {bank_name}\n\n"
         f"⭐️ Количество: {amount} Stars\n\n"
         "📲 Теперь отправьте только QR-код "
         "для получения выплаты.\n\n"
-        "❗️Не отправляйте номер карты или другие данные — "
-        "нужен именно QR.",
-        reply_markup=back_button()
+        "❗️Нужен именно QR-код."
     )
 
     await callback.answer()
 
 
-@dp.message(SellState.waiting_qr, F.photo)
-async def receive_sell_qr(message: Message, state: FSMContext):
+@dp.message(
+    SellState.waiting_qr,
+    F.photo
+)
+async def receive_sell_qr(
+    message: Message,
+    state: FSMContext
+):
     data = await state.get_data()
 
     amount = data.get("sell_amount")
@@ -512,12 +575,16 @@ async def receive_sell_qr(message: Message, state: FSMContext):
         await state.clear()
 
         await message.answer(
-            "❌ Данные заявки потеряны. Начните продажу заново.",
+            "❌ Данные заявки потеряны.\n"
+            "Начните продажу заново.",
             reply_markup=main_menu()
         )
         return
 
-    price_usd = amount / 100 * STARS_SELL_RATE_USD
+    price_usd = (
+        amount / 100
+    ) * STARS_SELL_RATE_USD
+
     price_kgs = usd_to_kgs(price_usd)
 
     username = (
@@ -534,6 +601,8 @@ async def receive_sell_qr(message: Message, state: FSMContext):
         price=price_usd,
     )
 
+    photo_id = message.photo[-1].file_id
+
     await state.clear()
 
     await message.answer(
@@ -542,7 +611,9 @@ async def receive_sell_qr(message: Message, state: FSMContext):
         f"⭐️ Stars: {amount}\n"
         f"🏦 Банк: {bank}\n"
         f"💰 Выплата: {price_kgs:.2f} сом\n\n"
-        "💰 Деньги поступят в течение 24 часов.",
+        "Заявка отправлена на проверку.\n"
+        "После подтверждения деньги будут отправлены "
+        "в течение 24 часов.",
         reply_markup=main_menu()
     )
 
@@ -555,20 +626,20 @@ async def receive_sell_qr(message: Message, state: FSMContext):
         bank,
         price_usd,
         price_kgs,
-        message.photo[-1].file_id,
+        photo_id,
     )
 
 
 @dp.message(SellState.waiting_qr)
 async def sell_qr_only(message: Message):
     await message.answer(
-        "❌ Пожалуйста, отправьте именно QR-код фотографией."
+        "❌ Отправьте QR-код фотографией."
     )
 
 
-# =========================
+# ============================================================
 # PREMIUM
-# =========================
+# ============================================================
 
 @dp.callback_query(F.data == "premium")
 async def premium(callback: CallbackQuery):
@@ -616,6 +687,7 @@ async def premium_self(callback: CallbackQuery):
         callback.message,
         "self"
     )
+
     await callback.answer()
 
 
@@ -624,8 +696,6 @@ async def premium_friend(
     callback: CallbackQuery,
     state: FSMContext
 ):
-    await state.update_data(premium_for="friend")
-
     await state.set_state(
         PremiumState.waiting_friend_username
     )
@@ -655,10 +725,6 @@ async def premium_friend_username(
             "❌ Укажите корректный username."
         )
         return
-
-    await state.update_data(
-        recipient_username=username
-    )
 
     await state.clear()
 
@@ -701,7 +767,10 @@ async def show_premium_durations(
     text = "💎 Выберите срок Premium:\n\n"
 
     if recipient_username:
-        text += f"👤 Получатель: {recipient_username}\n\n"
+        text += (
+            f"👤 Получатель: "
+            f"{recipient_username}\n\n"
+        )
 
     text += (
         f"3 месяца — {PREMIUM_PRICES_USD['3']:.2f}$ "
@@ -719,7 +788,9 @@ async def show_premium_durations(
 
 
 @dp.callback_query(F.data.startswith("premium_"))
-async def premium_duration(callback: CallbackQuery):
+async def premium_duration(
+    callback: CallbackQuery
+):
     parts = callback.data.split("_")
 
     if len(parts) != 3:
@@ -764,8 +835,8 @@ async def premium_duration(callback: CallbackQuery):
         "Оплатить надо полную сумму !!\n"
         "Возврата денег не подлежит, будьте внимательны.\n\n"
         f"📦 Заказ №{order_id}\n\n"
-        "💳 Реквизиты для оплаты будут отправлены "
-        "администратором.\n\n"
+        "💳 Этап оплаты\n"
+        "Реквизиты для оплаты будут добавлены позже.\n\n"
         "После оплаты нажмите кнопку ниже."
     )
 
@@ -794,7 +865,7 @@ async def premium_duration(callback: CallbackQuery):
         callback.from_user.id,
         username,
         "💎 Telegram Premium",
-        f"{months} месяцев, {recipient}",
+        f"{months} месяцев ({recipient})",
         price_usd,
         price_kgs,
     )
@@ -802,9 +873,9 @@ async def premium_duration(callback: CallbackQuery):
     await callback.answer()
 
 
-# =========================
-# PAID BUTTON
-# =========================
+# ============================================================
+# PAID
+# ============================================================
 
 @dp.callback_query(F.data.startswith("paid_"))
 async def paid_order(callback: CallbackQuery):
@@ -814,31 +885,29 @@ async def paid_order(callback: CallbackQuery):
         )
     except ValueError:
         await callback.answer(
-            "Ошибка заказа",
+            "Ошибка заказа.",
             show_alert=True
         )
         return
 
     await callback.message.edit_text(
-        f"⏳ Оплата по заказу №{order_id} отправлена "
-        "на проверку.\n\n"
-        "После подтверждения администратором заказ "
-        "будет обработан.",
+        f"⏳ Оплата по заказу №{order_id} "
+        "отправлена на проверку.\n\n"
+        "Ожидайте подтверждения администратора.",
         reply_markup=main_menu()
     )
 
     await callback.answer(
-        "Оплата отправлена на проверку."
+        "Оплата отправлена."
     )
 
     if ADMIN_ID:
         try:
             await callback.bot.send_message(
                 ADMIN_ID,
-                f"💳 Пользователь нажал «Я оплатил»\n\n"
+                "💳 ПОЛЬЗОВАТЕЛЬ НАЖАЛ «Я ОПЛАТИЛ»\n\n"
                 f"📦 Заказ №{order_id}\n"
-                f"👤 Пользователь: "
-                f"{get_name_from_callback(callback)}\n"
+                f"👤 {get_user_display(callback)}\n"
                 f"🆔 ID: {callback.from_user.id}",
                 reply_markup=admin_order_keyboard(order_id)
             )
@@ -846,16 +915,16 @@ async def paid_order(callback: CallbackQuery):
             pass
 
 
-def get_name_from_callback(callback: CallbackQuery):
+def get_user_display(callback: CallbackQuery):
     if callback.from_user.username:
         return f"@{callback.from_user.username}"
 
     return callback.from_user.full_name
 
 
-# =========================
-# MY ORDERS
-# =========================
+# ============================================================
+# ORDERS
+# ============================================================
 
 @dp.callback_query(F.data == "orders")
 async def orders(callback: CallbackQuery):
@@ -868,13 +937,21 @@ async def orders(callback: CallbackQuery):
             "📦 У вас пока нет заказов.",
             reply_markup=back_button()
         )
+
         await callback.answer()
         return
 
-    text = "📦 Ваши заказы:\n\n"
+    text = "📦 Мои заказы\n\n"
 
     for row in rows[:20]:
-        order_id, order_type, amount, price, status, created_at = row
+        (
+            order_id,
+            order_type,
+            amount,
+            price,
+            status,
+            created_at
+        ) = row
 
         if order_type == "BUY_STARS":
             icon = "⭐️"
@@ -912,9 +989,9 @@ async def orders(callback: CallbackQuery):
     await callback.answer()
 
 
-# =========================
+# ============================================================
 # PROFILE
-# =========================
+# ============================================================
 
 @dp.callback_query(F.data == "profile")
 async def profile(callback: CallbackQuery):
@@ -942,9 +1019,9 @@ async def profile(callback: CallbackQuery):
     await callback.answer()
 
 
-# =========================
+# ============================================================
 # SUPPORT
-# =========================
+# ============================================================
 
 @dp.callback_query(F.data == "support")
 async def support(callback: CallbackQuery):
@@ -973,9 +1050,9 @@ async def support(callback: CallbackQuery):
     await callback.answer()
 
 
-# =========================
+# ============================================================
 # ADMIN NOTIFICATIONS
-# =========================
+# ============================================================
 
 async def notify_admin_new_order(
     bot: Bot,
@@ -999,7 +1076,7 @@ async def notify_admin_new_order(
         f"🇰🇬 {price_kgs:.2f} сом\n\n"
         f"👤 Username: {username}\n"
         f"🆔 Telegram ID: {telegram_id}\n"
-        f"📌 Статус: ожидание оплаты"
+        "📌 Статус: ожидание оплаты"
     )
 
     try:
@@ -1035,7 +1112,7 @@ async def notify_admin_sell_order(
         f"🇰🇬 Выплата: {price_kgs:.2f} сом\n\n"
         f"👤 Username: {username}\n"
         f"🆔 Telegram ID: {telegram_id}\n\n"
-        "📲 QR-код пользователя отправлен следующим сообщением."
+        "📲 QR-код пользователя:"
     )
 
     try:
@@ -1055,15 +1132,15 @@ async def notify_admin_sell_order(
         pass
 
 
-# =========================
-# ADMIN
-# =========================
+# ============================================================
+# ADMIN CONFIRM
+# ============================================================
 
 @dp.callback_query(F.data.startswith("admin_done_"))
 async def admin_done(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer(
-            "Нет доступа.",
+            "❌ Нет доступа.",
             show_alert=True
         )
         return
@@ -1079,6 +1156,35 @@ async def admin_done(callback: CallbackQuery):
         )
         return
 
+    # Сначала получаем pending-заказ,
+    # чтобы сохранить Telegram ID пользователя.
+    pending_orders = await get_pending_orders()
+
+    target_order = None
+
+    for row in pending_orders:
+        if row[0] == order_id:
+            target_order = row
+            break
+
+    if not target_order:
+        await callback.answer(
+            "Заказ уже обработан или не найден.",
+            show_alert=True
+        )
+        return
+
+    (
+        _order_id,
+        telegram_id,
+        username,
+        order_type,
+        amount,
+        price,
+        status,
+        created_at
+    ) = target_order
+
     await set_order_status(
         order_id,
         "COMPLETED"
@@ -1089,37 +1195,58 @@ async def admin_done(callback: CallbackQuery):
         + "\n\n✅ Заказ отмечен как выполненный."
     )
 
+    # Сообщение пользователю зависит от типа заказа.
+    if order_type == "BUY_STARS":
+        user_text = (
+            "✅ Заказ оформлен!\n\n"
+            f"📦 Заказ №{order_id}\n"
+            "⭐️ Stars поступят в течение 24 часов."
+        )
+
+    elif order_type == "PREMIUM":
+        user_text = (
+            "✅ Заказ оформлен!\n\n"
+            f"📦 Заказ №{order_id}\n"
+            "💎 Premium поступит в течение 24 часов."
+        )
+
+    elif order_type == "SELL_STARS":
+        user_text = (
+            "✅ Заявка оформлена!\n\n"
+            f"📦 Заказ №{order_id}\n"
+            "💰 Деньги поступят в течение 24 часов."
+        )
+
+    else:
+        user_text = (
+            "✅ Заказ оформлен!\n\n"
+            f"📦 Заказ №{order_id}\n"
+            "Заказ будет обработан в течение 24 часов."
+        )
+
+    try:
+        await callback.bot.send_message(
+            telegram_id,
+            user_text,
+            reply_markup=main_menu()
+        )
+    except Exception:
+        pass
+
     await callback.answer(
-        "Заказ выполнен."
+        "Заказ подтверждён."
     )
 
-    # Получаем список pending, чтобы найти пользователя
-    orders = await get_pending_orders()
 
-    user_id = None
-
-    for row in orders:
-        if row[0] == order_id:
-            user_id = row[1]
-            break
-
-    if user_id:
-        try:
-            await callback.bot.send_message(
-                user_id,
-                f"✅ Заказ оформлен!\n\n"
-                f"📦 Заказ №{order_id}\n\n"
-                "Ваш заказ обработан."
-            )
-        except Exception:
-            pass
-
+# ============================================================
+# ADMIN REJECT
+# ============================================================
 
 @dp.callback_query(F.data.startswith("admin_reject_"))
 async def admin_reject(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer(
-            "Нет доступа.",
+            "❌ Нет доступа.",
             show_alert=True
         )
         return
@@ -1135,6 +1262,24 @@ async def admin_reject(callback: CallbackQuery):
         )
         return
 
+    pending_orders = await get_pending_orders()
+
+    target_order = None
+
+    for row in pending_orders:
+        if row[0] == order_id:
+            target_order = row
+            break
+
+    if not target_order:
+        await callback.answer(
+            "Заказ уже обработан или не найден.",
+            show_alert=True
+        )
+        return
+
+    telegram_id = target_order[1]
+
     await set_order_status(
         order_id,
         "REJECTED"
@@ -1145,14 +1290,25 @@ async def admin_reject(callback: CallbackQuery):
         + "\n\n❌ Заказ отклонён."
     )
 
+    try:
+        await callback.bot.send_message(
+            telegram_id,
+            f"❌ Заказ №{order_id} отклонён.\n\n"
+            "Если у вас есть вопросы, обратитесь "
+            "в поддержку.",
+            reply_markup=main_menu()
+        )
+    except Exception:
+        pass
+
     await callback.answer(
         "Заказ отклонён."
     )
 
 
-# =========================
-# ADMIN COMMAND
-# =========================
+# ============================================================
+# ADMIN PANEL
+# ============================================================
 
 @dp.message(F.text == "/admin")
 async def admin_panel(message: Message):
@@ -1213,9 +1369,9 @@ async def admin_panel(message: Message):
         )
 
 
-# =========================
+# ============================================================
 # MAIN
-# =========================
+# ============================================================
 
 async def main():
     await init_db()
@@ -1225,7 +1381,9 @@ async def main():
             "BOT_TOKEN не установлен в Railway Variables"
         )
 
-    bot = Bot(token=BOT_TOKEN)
+    bot = Bot(
+        token=BOT_TOKEN
+    )
 
     print("Starzo запущен!")
 
