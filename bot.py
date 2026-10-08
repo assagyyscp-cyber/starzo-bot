@@ -3,7 +3,6 @@ import logging
 from decimal import Decimal, InvalidOperation
 
 import aiohttp
-
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -31,8 +30,6 @@ from settings import (
     STARS_BUY_RATE_USD,
     MIN_STARS,
     PREMIUM_PRICES_USD,
-    SHOP_NAME,
-    PAYMENT_CURRENCY,
 )
 
 from database import (
@@ -48,7 +45,6 @@ from database import (
 
 
 logging.basicConfig(level=logging.INFO)
-
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не указан")
@@ -71,6 +67,14 @@ dp = Dispatcher()
 
 
 # =========================================================
+# OPTIMA
+# =========================================================
+
+OPTIMA_ACCOUNT = "1090934711416531"
+OPTIMA_RECIPIENT = "Аким У."
+
+
+# =========================================================
 # STATES
 # =========================================================
 
@@ -80,6 +84,10 @@ class BuyStarsState(StatesGroup):
 
 class PremiumState(StatesGroup):
     waiting_friend_username = State()
+
+
+class OptimaReceiptState(StatesGroup):
+    waiting_receipt = State()
 
 
 # =========================================================
@@ -117,6 +125,10 @@ def normalize_username(value: str) -> str:
     return value
 
 
+# =========================================================
+# MAIN MENU
+# =========================================================
+
 def main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -137,18 +149,9 @@ def main_menu() -> ReplyKeyboardMarkup:
     )
 
 
-def back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="back_main",
-                )
-            ]
-        ]
-    )
-
+# =========================================================
+# KEYBOARDS
+# =========================================================
 
 def buy_stars_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -189,25 +192,50 @@ def buy_stars_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def stars_payment_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🤖 Crypto Bot",
+                    callback_data="stars_pay_crypto",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏦 Optima 24",
+                    callback_data="stars_pay_optima",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="back_main",
+                )
+            ],
+        ]
+    )
+
+
 def premium_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text="3 месяца — $12.99",
-                    callback_data="premium_3",
+                    callback_data="premium_months:3",
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="6 месяцев — $17.99",
-                    callback_data="premium_6",
+                    callback_data="premium_months:6",
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="12 месяцев — $30.00",
-                    callback_data="premium_12",
+                    callback_data="premium_months:12",
                 )
             ],
             [
@@ -226,13 +254,13 @@ def premium_target_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="👤 Себе",
-                    callback_data="premium_self",
+                    callback_data="premium_target:self",
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="👥 Другому пользователю",
-                    callback_data="premium_friend",
+                    callback_data="premium_target:friend",
                 )
             ],
             [
@@ -245,7 +273,35 @@ def premium_target_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def payment_keyboard(order_id: int, invoice_url: str) -> InlineKeyboardMarkup:
+def premium_payment_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🤖 Crypto Bot",
+                    callback_data="premium_pay:crypto",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏦 Optima 24",
+                    callback_data="premium_pay:optima",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад",
+                    callback_data="premium_back",
+                )
+            ],
+        ]
+    )
+
+
+def crypto_payment_keyboard(
+    order_id: int,
+    invoice_url: str,
+) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -258,6 +314,25 @@ def payment_keyboard(order_id: int, invoice_url: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="🔄 Проверить оплату",
                     callback_data=f"check_payment:{order_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⬅️ В магазин",
+                    callback_data="back_main",
+                )
+            ],
+        ]
+    )
+
+
+def optima_paid_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Я оплатил",
+                    callback_data=f"optima_paid:{order_id}",
                 )
             ],
             [
@@ -288,7 +363,7 @@ def admin_order_keyboard(order_id: int) -> InlineKeyboardMarkup:
 
 
 # =========================================================
-# CRYPTO PAY API
+# CRYPTO PAY
 # =========================================================
 
 CRYPTO_API_URL = "https://pay.crypt.bot/api"
@@ -319,7 +394,10 @@ async def crypto_api(
 
             if not result.get("ok"):
                 raise RuntimeError(
-                    result.get("error", "Crypto Pay API error")
+                    result.get(
+                        "error",
+                        "Crypto Pay API error",
+                    )
                 )
 
             return result.get("result")
@@ -336,8 +414,6 @@ async def create_crypto_invoice(
             "fiat": "USD",
             "amount": f"{amount_usd:.2f}",
             "description": description,
-            "paid_btn_name": "callback",
-            "paid_btn_url": "https://t.me/",
         },
     )
 
@@ -379,6 +455,29 @@ def welcome_text(message: Message) -> str:
         "<b>Telegram Stars</b>, "
         "<b>Telegram Premium</b>.\n\n"
         "Выберите нужное действие ниже."
+    )
+
+
+def optima_text(
+    order_id: int,
+    product: str,
+    price: float,
+) -> str:
+    return (
+        "🏦 <b>Оплата через Optima 24</b>\n\n"
+        f"Заказ №<b>{order_id}</b>\n"
+        f"Товар: <b>{product}</b>\n"
+        f"К оплате: <b>{format_usd(price)}</b>\n"
+        f"Сумма: <b>{format_kgs(price)}</b>\n\n"
+        "Переведите указанную сумму по реквизитам:\n\n"
+        f"🏦 <b>Номер счёта:</b>\n"
+        f"<code>{OPTIMA_ACCOUNT}</code>\n\n"
+        f"👤 <b>Получатель:</b>\n"
+        f"<b>{OPTIMA_RECIPIENT}</b>\n\n"
+        "После оплаты нажмите «✅ Я оплатил».\n\n"
+        "⚠️ <b>Чек обязателен.</b>\n"
+        "После нажатия кнопки бот попросит отправить "
+        "фото или скриншот чека."
     )
 
 
@@ -429,66 +528,36 @@ async def buy_stars(
     )
 
 
-async def process_buy_stars(
+async def show_stars_payment(
     message: Message,
-    stars: int,
+    state: FSMContext,
 ):
-    if stars < MIN_STARS:
+    data = await state.get_data()
+
+    stars = data.get("stars")
+
+    if not stars:
+        await state.clear()
+
         await message.answer(
-            f"⚠️ Минимальная покупка — {MIN_STARS} Stars."
+            "❌ Сессия заказа устарела.\n"
+            "Начните покупку Stars заново.",
+            reply_markup=main_menu(),
         )
         return
 
-    price = (stars / 100) * STARS_BUY_RATE_USD
+    price = (int(stars) / 100) * STARS_BUY_RATE_USD
 
-    username = username_text(message)
-
-    order_id = await create_order(
-        telegram_id=message.from_user.id,
-        username=username,
-        order_type="STARS",
-        amount=str(stars),
-        price=price,
-    )
-
-    try:
-        invoice = await create_crypto_invoice(
-            amount_usd=price,
-            description=f"Starzo — покупка {stars} Telegram Stars",
-        )
-
-    except Exception as e:
-        logging.exception(e)
-
-        await set_order_status(
-            order_id,
-            "PAYMENT_ERROR",
-        )
-
-        await message.answer(
-            "❌ Не удалось создать счёт Crypto Bot.\n\n"
-            "Попробуйте ещё раз позже."
-        )
-        return
-
-    await set_crypto_invoice(
-        order_id=order_id,
-        invoice_id=invoice["id"],
-        invoice_url=invoice["url"],
+    await state.update_data(
+        stars_price=price,
     )
 
     await message.answer(
-        "⭐️ <b>Заказ создан</b>\n\n"
-        f"Заказ №<b>{order_id}</b>\n"
-        f"Количество: <b>{stars} Stars</b>\n"
+        f"⭐️ <b>{stars} Stars</b>\n\n"
         f"Стоимость: <b>{format_usd(price)}</b>\n"
-        f"К оплате: <b>{format_kgs(price)}</b>\n\n"
-        "Нажмите кнопку ниже и оплатите через Crypto Bot.\n\n"
-        "После оплаты нажмите «🔄 Проверить оплату».",
-        reply_markup=payment_keyboard(
-            order_id,
-            invoice["url"],
-        ),
+        f"В сомах: <b>{format_kgs(price)}</b>\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=stars_payment_keyboard(),
     )
 
 
@@ -497,9 +566,9 @@ async def buy_callback(
     callback: CallbackQuery,
     state: FSMContext,
 ):
-    action = callback.data
-
     await callback.answer()
+
+    action = callback.data
 
     if action == "buy_custom":
         await state.set_state(
@@ -520,9 +589,19 @@ async def buy_callback(
     except ValueError:
         return
 
-    await process_buy_stars(
+    if stars < MIN_STARS:
+        await callback.message.answer(
+            f"❌ Минимальная покупка — {MIN_STARS} Stars."
+        )
+        return
+
+    await state.update_data(
+        stars=stars,
+    )
+
+    await show_stars_payment(
         callback.message,
-        stars,
+        state,
     )
 
 
@@ -533,7 +612,7 @@ async def custom_stars_amount(
 ):
     try:
         stars = int(
-            message.text.strip()
+            (message.text or "").strip()
         )
     except (ValueError, AttributeError):
         await message.answer(
@@ -548,11 +627,149 @@ async def custom_stars_amount(
         )
         return
 
+    await state.update_data(
+        stars=stars,
+    )
+
     await state.clear()
 
-    await process_buy_stars(
-        message,
-        stars,
+    await message.answer(
+        f"⭐️ <b>{stars} Stars</b>\n\n"
+        f"Стоимость: <b>{format_usd((stars / 100) * STARS_BUY_RATE_USD)}</b>\n"
+        f"В сомах: <b>{format_kgs((stars / 100) * STARS_BUY_RATE_USD)}</b>\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=stars_payment_keyboard(),
+    )
+
+    await state.update_data(
+        stars=stars,
+    )
+
+
+# =========================================================
+# STARS PAYMENT
+# =========================================================
+
+@dp.callback_query(F.data == "stars_pay_crypto")
+async def stars_pay_crypto(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+
+    data = await state.get_data()
+
+    stars = data.get("stars")
+
+    if not stars:
+        await callback.message.answer(
+            "❌ Сессия заказа устарела.\n"
+            "Начните покупку Stars заново.",
+            reply_markup=main_menu(),
+        )
+        await state.clear()
+        return
+
+    price = (int(stars) / 100) * STARS_BUY_RATE_USD
+
+    order_id = await create_order(
+        telegram_id=callback.from_user.id,
+        username=username_text(callback.message),
+        order_type="STARS",
+        amount=str(stars),
+        price=price,
+    )
+
+    try:
+        invoice = await create_crypto_invoice(
+            amount_usd=price,
+            description=(
+                f"Starzo — покупка {stars} Telegram Stars"
+            ),
+        )
+
+        await set_crypto_invoice(
+            order_id,
+            invoice["id"],
+            invoice["url"],
+        )
+
+    except Exception as e:
+        logging.exception(e)
+
+        await set_order_status(
+            order_id,
+            "PAYMENT_ERROR",
+        )
+
+        await callback.message.answer(
+            "❌ Не удалось создать счёт Crypto Bot.\n\n"
+            "Попробуйте ещё раз позже.",
+            reply_markup=main_menu(),
+        )
+
+        await state.clear()
+        return
+
+    await state.clear()
+
+    await callback.message.answer(
+        "⭐️ <b>Заказ создан</b>\n\n"
+        f"Заказ №<b>{order_id}</b>\n"
+        f"Количество: <b>{stars} Stars</b>\n"
+        f"Стоимость: <b>{format_usd(price)}</b>\n"
+        f"В сомах: <b>{format_kgs(price)}</b>\n\n"
+        "Оплатите через Crypto Bot.\n"
+        "После оплаты нажмите «🔄 Проверить оплату».\n\n"
+        "📌 Чек для Crypto Bot не требуется.",
+        reply_markup=crypto_payment_keyboard(
+            order_id,
+            invoice["url"],
+        ),
+    )
+
+
+@dp.callback_query(F.data == "stars_pay_optima")
+async def stars_pay_optima(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+
+    data = await state.get_data()
+
+    stars = data.get("stars")
+
+    if not stars:
+        await callback.message.answer(
+            "❌ Сессия заказа устарела.\n"
+            "Начните покупку Stars заново.",
+            reply_markup=main_menu(),
+        )
+        await state.clear()
+        return
+
+    price = (int(stars) / 100) * STARS_BUY_RATE_USD
+
+    order_id = await create_order(
+        telegram_id=callback.from_user.id,
+        username=username_text(callback.message),
+        order_type="STARS_OPTIMA",
+        amount=str(stars),
+        price=price,
+    )
+
+    await state.clear()
+
+    await callback.message.answer(
+        optima_text(
+            order_id,
+            f"{stars} Stars",
+            price,
+        ),
+        reply_markup=optima_paid_keyboard(
+            order_id
+        ),
     )
 
 
@@ -584,6 +801,8 @@ async def premium_callback(
     action = callback.data
 
     if action == "premium_back":
+        await state.clear()
+
         await callback.message.edit_text(
             "💎 <b>Telegram Premium</b>\n\n"
             "Выберите срок подписки:",
@@ -591,51 +810,102 @@ async def premium_callback(
         )
         return
 
-    if action == "premium_self":
+    if action.startswith("premium_months:"):
+        months = action.split(":", 1)[1]
+
+        if months not in PREMIUM_PRICES_USD:
+            return
+
+        price = PREMIUM_PRICES_USD[months]
+
+        await state.update_data(
+            premium_months=months,
+            premium_price=float(price),
+        )
+
+        await callback.message.edit_text(
+            f"💎 <b>Premium на {months} месяцев</b>\n\n"
+            f"Цена: <b>{format_usd(float(price))}</b>\n"
+            f"В сомах: <b>{format_kgs(float(price))}</b>\n\n"
+            "Для кого оформить?",
+            reply_markup=premium_target_keyboard(),
+        )
+        return
+
+
+@dp.callback_query(F.data == "premium_target:self")
+async def premium_self(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+
+    data = await state.get_data()
+
+    months = data.get("premium_months")
+    price = data.get("premium_price")
+
+    if not months or not price:
         await state.clear()
 
-        await callback.message.edit_text(
-            "👤 <b>Premium для себя</b>\n\n"
-            "Сначала выберите срок подписки:",
-            reply_markup=premium_keyboard(),
+        await callback.message.answer(
+            "❌ Сессия заказа устарела.\n"
+            "Начните покупку Premium заново.",
+            reply_markup=main_menu(),
         )
         return
 
-    if action == "premium_friend":
-        await state.set_state(
-            PremiumState.waiting_friend_username
-        )
+    if not callback.from_user.username:
+        await state.clear()
 
-        await callback.message.edit_text(
-            "👥 <b>Premium для другого пользователя</b>\n\n"
-            "Введите Telegram username получателя.\n\n"
-            "Например:\n"
-            "<code>@username</code>"
+        await callback.message.answer(
+            "⚠️ <b>Для покупки Premium нужен Telegram username.</b>\n\n"
+            "Установите username в настройках Telegram "
+            "и начните покупку заново.",
+            reply_markup=main_menu(),
         )
         return
-
-    months = action.replace(
-        "premium_",
-        "",
-    )
-
-    if months not in PREMIUM_PRICES_USD:
-        return
-
-    price = PREMIUM_PRICES_USD[months]
 
     await state.update_data(
-        premium_months=months,
-        premium_price=price,
-        premium_target="self",
+        premium_target=f"@{callback.from_user.username}",
     )
 
     await callback.message.edit_text(
         f"💎 <b>Premium на {months} месяцев</b>\n\n"
-        f"Цена: <b>{format_usd(price)}</b>\n"
-        f"В сомах: <b>{format_kgs(price)}</b>\n\n"
-        "Для кого оформить?",
-        reply_markup=premium_target_keyboard(),
+        f"Стоимость: <b>{format_usd(float(price))}</b>\n"
+        f"В сомах: <b>{format_kgs(float(price))}</b>\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=premium_payment_keyboard(),
+    )
+
+
+@dp.callback_query(F.data == "premium_target:friend")
+async def premium_friend(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+
+    data = await state.get_data()
+
+    if not data.get("premium_months"):
+        await state.clear()
+
+        await callback.message.answer(
+            "❌ Сначала выберите срок Premium.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    await state.set_state(
+        PremiumState.waiting_friend_username
+    )
+
+    await callback.message.edit_text(
+        "👥 <b>Premium для другого пользователя</b>\n\n"
+        "Введите Telegram username получателя.\n\n"
+        "Например:\n"
+        "<code>@username</code>"
     )
 
 
@@ -670,8 +940,51 @@ async def premium_friend_username(
         )
         return
 
+    await state.update_data(
+        premium_target=target,
+    )
+
+    await state.set_state(None)
+
+    await message.answer(
+        f"💎 <b>Premium на {months} месяцев</b>\n\n"
+        f"Получатель: <b>{target}</b>\n"
+        f"Стоимость: <b>{format_usd(float(price))}</b>\n"
+        f"В сомах: <b>{format_kgs(float(price))}</b>\n\n"
+        "Выберите способ оплаты:",
+        reply_markup=premium_payment_keyboard(),
+    )
+
+
+# =========================================================
+# PREMIUM PAYMENT
+# =========================================================
+
+@dp.callback_query(F.data == "premium_pay:crypto")
+async def premium_pay_crypto(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+
+    data = await state.get_data()
+
+    months = data.get("premium_months")
+    price = data.get("premium_price")
+    target = data.get("premium_target")
+
+    if not months or not price or not target:
+        await state.clear()
+
+        await callback.message.answer(
+            "❌ Сессия заказа устарела.\n"
+            "Начните покупку Premium заново.",
+            reply_markup=main_menu(),
+        )
+        return
+
     order_id = await create_order(
-        telegram_id=message.from_user.id,
+        telegram_id=callback.from_user.id,
         username=target,
         order_type=f"PREMIUM_{months}",
         amount=target,
@@ -687,6 +1000,12 @@ async def premium_friend_username(
             ),
         )
 
+        await set_crypto_invoice(
+            order_id,
+            invoice["id"],
+            invoice["url"],
+        )
+
     except Exception as e:
         logging.exception(e)
 
@@ -697,34 +1016,293 @@ async def premium_friend_username(
 
         await state.clear()
 
-        await message.answer(
-            "❌ Не удалось создать счёт Crypto Bot.",
+        await callback.message.answer(
+            "❌ Не удалось создать счёт Crypto Bot.\n"
+            "Попробуйте ещё раз позже.",
             reply_markup=main_menu(),
         )
         return
 
-    await set_crypto_invoice(
-        order_id,
-        invoice["id"],
-        invoice["url"],
-    )
-
     await state.clear()
 
-    await message.answer(
+    await callback.message.answer(
         "💎 <b>Заказ Premium создан</b>\n\n"
         f"Заказ №<b>{order_id}</b>\n"
         f"Срок: <b>{months} месяцев</b>\n"
         f"Получатель: <b>{target}</b>\n"
         f"Стоимость: <b>{format_usd(float(price))}</b>\n"
-        f"К оплате: <b>{format_kgs(float(price))}</b>\n\n"
+        f"В сомах: <b>{format_kgs(float(price))}</b>\n\n"
         "Оплатите через Crypto Bot.\n"
-        "После оплаты нажмите «🔄 Проверить оплату».",
-        reply_markup=payment_keyboard(
+        "После оплаты нажмите «🔄 Проверить оплату».\n\n"
+        "📌 Чек для Crypto Bot не требуется.",
+        reply_markup=crypto_payment_keyboard(
             order_id,
             invoice["url"],
         ),
     )
+
+
+@dp.callback_query(F.data == "premium_pay:optima")
+async def premium_pay_optima(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+
+    data = await state.get_data()
+
+    months = data.get("premium_months")
+    price = data.get("premium_price")
+    target = data.get("premium_target")
+
+    if not months or not price or not target:
+        await state.clear()
+
+        await callback.message.answer(
+            "❌ Сессия заказа устарела.\n"
+            "Начните покупку Premium заново.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    order_id = await create_order(
+        telegram_id=callback.from_user.id,
+        username=target,
+        order_type=f"PREMIUM_{months}_OPTIMA",
+        amount=target,
+        price=float(price),
+    )
+
+    await state.clear()
+
+    await callback.message.answer(
+        optima_text(
+            order_id,
+            f"Telegram Premium — {months} месяцев\n"
+            f"Получатель: {target}",
+            float(price),
+        ),
+        reply_markup=optima_paid_keyboard(
+            order_id
+        ),
+    )
+
+
+# =========================================================
+# OPTIMA: USER SAYS PAID
+# =========================================================
+
+@dp.callback_query(F.data.startswith("optima_paid:"))
+async def optima_paid(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+    await callback.answer()
+
+    try:
+        order_id = int(
+            callback.data.split(":")[1]
+        )
+    except (ValueError, IndexError):
+        await callback.message.answer(
+            "❌ Ошибка заказа."
+        )
+        return
+
+    order = await get_order(order_id)
+
+    if not order:
+        await callback.message.answer(
+            "❌ Заказ не найден."
+        )
+        return
+
+    (
+        db_order_id,
+        telegram_id,
+        username,
+        order_type,
+        amount,
+        price,
+        status,
+        invoice_id,
+        invoice_url,
+        created_at,
+    ) = order
+
+    if telegram_id != callback.from_user.id:
+        await callback.message.answer(
+            "❌ Этот заказ вам не принадлежит."
+        )
+        return
+
+    if status != "WAITING_PAYMENT":
+        await callback.message.answer(
+            "⚠️ Этот заказ уже обрабатывается."
+        )
+        return
+
+    await state.set_state(
+        OptimaReceiptState.waiting_receipt
+    )
+
+    await state.update_data(
+        optima_order_id=order_id,
+    )
+
+    await callback.message.answer(
+        "🧾 <b>Отправьте чек</b>\n\n"
+        "Фото или скриншот подтверждения оплаты "
+        "через Optima 24.\n\n"
+        "⚠️ <b>Без чека заказ не будет принят.</b>"
+    )
+
+
+# =========================================================
+# OPTIMA: RECEIPT
+# =========================================================
+
+@dp.message(OptimaReceiptState.waiting_receipt)
+async def optima_receipt(
+    message: Message,
+    state: FSMContext,
+):
+    if not message.photo:
+        await message.answer(
+            "⚠️ <b>Нужен именно чек.</b>\n\n"
+            "Отправьте фото или скриншот чека Optima 24."
+        )
+        return
+
+    data = await state.get_data()
+
+    order_id = data.get("optima_order_id")
+
+    if not order_id:
+        await state.clear()
+
+        await message.answer(
+            "❌ Сессия заказа устарела.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    order = await get_order(order_id)
+
+    if not order:
+        await state.clear()
+
+        await message.answer(
+            "❌ Заказ не найден.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    (
+        db_order_id,
+        telegram_id,
+        username,
+        order_type,
+        amount,
+        price,
+        status,
+        invoice_id,
+        invoice_url,
+        created_at,
+    ) = order
+
+    if telegram_id != message.from_user.id:
+        await state.clear()
+
+        await message.answer(
+            "❌ Этот заказ вам не принадлежит.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if status != "WAITING_PAYMENT":
+        await state.clear()
+
+        await message.answer(
+            "⚠️ Этот заказ уже обрабатывается.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    await set_order_status(
+        order_id,
+        "PROCESSING",
+    )
+
+    if order_type == "STARS_OPTIMA":
+        product = f"{amount} Stars"
+
+    elif order_type.startswith("PREMIUM_"):
+
+        product_type = order_type.replace(
+            "PREMIUM_",
+            "",
+        )
+
+        if product_type.endswith("_OPTIMA"):
+            product_type = product_type.replace(
+                "_OPTIMA",
+                "",
+            )
+
+        product = (
+            f"Telegram Premium — "
+            f"{product_type} месяцев"
+        )
+
+    else:
+        product = order_type
+
+    await message.answer(
+        "✅ <b>Чек получен!</b>\n\n"
+        f"Заказ №<b>{order_id}</b>\n"
+        "Заказ отправлен на проверку.\n\n"
+        "После подтверждения заказ будет выполнен "
+        "в течение 24 часов.",
+        reply_markup=main_menu(),
+    )
+
+    # Отправляем админу информацию
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            "🏦 <b>Новая оплата через Optima 24!</b>\n\n"
+            f"Заказ №<b>{order_id}</b>\n"
+            f"Пользователь: <b>{username}</b>\n"
+            f"Telegram ID: <code>{telegram_id}</code>\n"
+            f"Товар: <b>{product}</b>\n"
+            f"Сумма: <b>{format_usd(price)}</b>\n"
+            f"В сомах: <b>{format_kgs(price)}</b>\n\n"
+            "🧾 <b>Чек прикреплён следующим сообщением.</b>",
+            reply_markup=admin_order_keyboard(
+                order_id
+            ),
+        )
+
+        await bot.send_photo(
+            ADMIN_ID,
+            message.photo[-1].file_id,
+            caption=(
+                f"🧾 <b>Чек заказа №{order_id}</b>\n"
+                f"Пользователь: {username}\n"
+                f"Товар: {product}\n"
+                f"Сумма: {format_usd(price)} "
+                f"({format_kgs(price)})"
+            ),
+        )
+
+    except Exception as e:
+        logging.exception(
+            "Не удалось отправить чек админу: %s",
+            e,
+        )
+
+    await state.clear()
 
 
 # =========================================================
@@ -776,6 +1354,7 @@ async def my_orders(
     text = "📦 <b>Мои заказы</b>\n\n"
 
     for order in orders[:20]:
+
         (
             order_id,
             order_type,
@@ -788,14 +1367,29 @@ async def my_orders(
         if order_type == "STARS":
             product = f"{amount} Stars"
 
+        elif order_type == "STARS_OPTIMA":
+            product = f"{amount} Stars — Optima 24"
+
         elif order_type.startswith("PREMIUM_"):
+
             months = order_type.replace(
                 "PREMIUM_",
                 "",
             )
-            product = (
-                f"Premium на {months} месяцев"
-            )
+
+            if months.endswith("_OPTIMA"):
+                months = months.replace(
+                    "_OPTIMA",
+                    "",
+                )
+
+                product = (
+                    f"Premium на {months} месяцев — Optima 24"
+                )
+            else:
+                product = (
+                    f"Premium на {months} месяцев"
+                )
 
         else:
             product = order_type
@@ -863,10 +1457,8 @@ async def support(
     message: Message,
 ):
     if SUPPORT_USERNAME:
-        username = SUPPORT_USERNAME
 
-        if not username.startswith("@"):
-            username = "@" + username
+        username = SUPPORT_USERNAME.lstrip("@")
 
         await message.answer(
             "💬 <b>Поддержка</b>\n\n"
@@ -877,7 +1469,7 @@ async def support(
                     [
                         InlineKeyboardButton(
                             text="💬 Написать в поддержку",
-                            url=f"https://t.me/{username.lstrip('@')}",
+                            url=f"https://t.me/{username}",
                         )
                     ],
                     [
@@ -889,7 +1481,9 @@ async def support(
                 ]
             ),
         )
+
     else:
+
         await message.answer(
             "💬 <b>Поддержка</b>\n\n"
             "Поддержка пока не настроена.",
@@ -898,8 +1492,109 @@ async def support(
 
 
 # =========================================================
-# CHECK PAYMENT
+# CRYPTO PAYMENT CHECK
 # =========================================================
+
+async def process_crypto_paid_order(
+    order_id: int,
+):
+    order = await get_order(order_id)
+
+    if not order:
+        return False
+
+    (
+        db_order_id,
+        telegram_id,
+        username,
+        order_type,
+        amount,
+        price,
+        status,
+        invoice_id,
+        invoice_url,
+        created_at,
+    ) = order
+
+    if status != "WAITING_PAYMENT":
+        return False
+
+    await set_order_status(
+        order_id,
+        "PROCESSING",
+    )
+
+    if order_type == "STARS":
+
+        product = f"{amount} Stars"
+
+        user_text = (
+            "Заказ оформлен! "
+            "Stars поступят в течение 24 часов."
+        )
+
+    elif order_type.startswith("PREMIUM_"):
+
+        months = order_type.replace(
+            "PREMIUM_",
+            "",
+        )
+
+        product = (
+            f"Telegram Premium — {months} месяцев"
+        )
+
+        user_text = (
+            "Заказ оформлен! "
+            "Telegram Premium будет активирован "
+            "в течение 24 часов."
+        )
+
+    else:
+
+        product = order_type
+
+        user_text = (
+            "Заказ оформлен! "
+            "Заказ будет обработан "
+            "в течение 24 часов."
+        )
+
+    try:
+        await bot.send_message(
+            telegram_id,
+            f"✅ <b>{user_text}</b>\n\n"
+            f"Заказ №<b>{order_id}</b>",
+        )
+    except Exception as e:
+        logging.warning(
+            "Не удалось уведомить пользователя: %s",
+            e,
+        )
+
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            "💰 <b>Новая оплаченная заявка!</b>\n\n"
+            f"Заказ №<b>{order_id}</b>\n"
+            f"Пользователь: <b>{username}</b>\n"
+            f"Telegram ID: <code>{telegram_id}</code>\n"
+            f"Товар: <b>{product}</b>\n"
+            f"Сумма: <b>{format_usd(price)}</b>\n"
+            f"В сомах: <b>{format_kgs(price)}</b>\n\n"
+            "🤖 Оплата через Crypto Bot подтверждена.",
+            reply_markup=admin_order_keyboard(
+                order_id
+            ),
+        )
+    except Exception as e:
+        logging.warning(
+            "Не удалось уведомить администратора: %s",
+            e,
+        )
+
+    return True
+
 
 @dp.callback_query(
     F.data.startswith("check_payment:")
@@ -979,7 +1674,7 @@ async def check_payment(
     except Exception:
         await callback.message.answer(
             "⚠️ Не удалось проверить оплату.\n"
-            "Попробуйте ещё раз через несколько секунд."
+            "Попробуйте ещё раз."
         )
         return
 
@@ -989,11 +1684,7 @@ async def check_payment(
         )
         return
 
-    invoice_status = invoice.get(
-        "status"
-    )
-
-    if invoice_status != "paid":
+    if invoice.get("status") != "paid":
         await callback.message.answer(
             "⏳ <b>Оплата пока не найдена.</b>\n\n"
             "Если вы уже оплатили счёт, "
@@ -1002,76 +1693,32 @@ async def check_payment(
         )
         return
 
-    await set_order_status(
-        order_id,
-        "PROCESSING",
+    success = await process_crypto_paid_order(
+        order_id
     )
 
-    if order_type == "STARS":
-        product_text = f"{amount} Stars"
-        user_text = (
-            "Заказ оформлен! "
-            "Stars поступят в течение 24 часов."
-        )
-
-    elif order_type.startswith("PREMIUM_"):
-        months = order_type.replace(
-            "PREMIUM_",
-            "",
-        )
-
-        product_text = (
-            f"Telegram Premium — {months} месяцев"
-        )
-
-        user_text = (
-            "Заказ оформлен! "
-            "Telegram Premium будет активирован "
-            "в течение 24 часов."
-        )
-
-    else:
-        product_text = order_type
-        user_text = (
-            "Заказ оформлен! "
+    if success:
+        await callback.message.answer(
+            "✅ <b>Оплата подтверждена!</b>\n\n"
+            f"Заказ №<b>{order_id}</b> оформлен.\n"
             "Заказ будет обработан в течение 24 часов."
         )
 
-    await callback.message.answer(
-        f"✅ <b>{user_text}</b>\n\n"
-        f"Заказ №<b>{order_id}</b>"
-    )
-
-    if ADMIN_ID:
-        try:
-            await bot.send_message(
-                ADMIN_ID,
-                "💰 <b>Новая оплаченная заявка!</b>\n\n"
-                f"Заказ №<b>{order_id}</b>\n"
-                f"Пользователь: <b>{username}</b>\n"
-                f"Telegram ID: <code>{telegram_id}</code>\n"
-                f"Товар: <b>{product_text}</b>\n"
-                f"Сумма: <b>{format_usd(price)}</b>\n"
-                f"В сомах: <b>{format_kgs(price)}</b>\n\n"
-                "Оплата через Crypto Bot подтверждена.",
-                reply_markup=admin_order_keyboard(
-                    order_id
-                ),
-            )
-        except Exception as e:
-            logging.exception(e)
-
 
 # =========================================================
-# AUTOMATIC PAYMENT CHECKER
+# AUTOMATIC CRYPTO PAYMENT CHECKER
 # =========================================================
 
 async def payment_checker():
+
     while True:
+
         try:
+
             orders = await get_waiting_payment_orders()
 
             for order in orders:
+
                 (
                     order_id,
                     telegram_id,
@@ -1085,17 +1732,22 @@ async def payment_checker():
                     created_at,
                 ) = order
 
+                if not invoice_id:
+                    continue
+
                 try:
                     invoice = await get_crypto_invoice(
                         invoice_id
                     )
 
                 except Exception as e:
+
                     logging.warning(
                         "Payment check error for order %s: %s",
                         order_id,
                         e,
                     )
+
                     continue
 
                 if not invoice:
@@ -1104,84 +1756,12 @@ async def payment_checker():
                 if invoice.get("status") != "paid":
                     continue
 
-                await set_order_status(
-                    order_id,
-                    "PROCESSING",
+                await process_crypto_paid_order(
+                    order_id
                 )
 
-                if order_type == "STARS":
-                    product_text = (
-                        f"{amount} Stars"
-                    )
-
-                    user_text = (
-                        "Заказ оформлен! "
-                        "Stars поступят в течение 24 часов."
-                    )
-
-                elif order_type.startswith("PREMIUM_"):
-                    months = order_type.replace(
-                        "PREMIUM_",
-                        "",
-                    )
-
-                    product_text = (
-                        f"Telegram Premium — "
-                        f"{months} месяцев"
-                    )
-
-                    user_text = (
-                        "Заказ оформлен! "
-                        "Telegram Premium будет активирован "
-                        "в течение 24 часов."
-                    )
-
-                else:
-                    product_text = order_type
-
-                    user_text = (
-                        "Заказ оформлен! "
-                        "Заказ будет обработан "
-                        "в течение 24 часов."
-                    )
-
-                try:
-                    await bot.send_message(
-                        telegram_id,
-                        f"✅ <b>{user_text}</b>\n\n"
-                        f"Заказ №<b>{order_id}</b>",
-                    )
-                except Exception as e:
-                    logging.warning(
-                        "Cannot notify user %s: %s",
-                        telegram_id,
-                        e,
-                    )
-
-                if ADMIN_ID:
-                    try:
-                        await bot.send_message(
-                            ADMIN_ID,
-                            "💰 <b>Новая оплаченная заявка!</b>\n\n"
-                            f"Заказ №<b>{order_id}</b>\n"
-                            f"Пользователь: <b>{username}</b>\n"
-                            f"Telegram ID: <code>{telegram_id}</code>\n"
-                            f"Товар: <b>{product_text}</b>\n"
-                            f"Сумма: <b>{format_usd(price)}</b>\n"
-                            f"В сомах: <b>{format_kgs(price)}</b>\n\n"
-                            "Оплата через Crypto Bot подтверждена.",
-                            reply_markup=admin_order_keyboard(
-                                order_id
-                            ),
-                        )
-
-                    except Exception as e:
-                        logging.warning(
-                            "Cannot notify admin: %s",
-                            e,
-                        )
-
         except Exception as e:
+
             logging.exception(
                 "Payment checker error: %s",
                 e,
@@ -1198,24 +1778,28 @@ async def payment_checker():
 async def admin_panel(
     message: Message,
 ):
+
     if message.from_user.id != ADMIN_ID:
         return
 
     orders = await get_pending_admin_orders()
 
     if not orders:
+
         await message.answer(
             "🛠 <b>Админ-панель</b>\n\n"
             "Нет заказов, ожидающих обработки."
         )
+
         return
 
     await message.answer(
-        f"🛠 <b>Админ-панель</b>\n\n"
+        "🛠 <b>Админ-панель</b>\n\n"
         f"Ожидают обработки: <b>{len(orders)}</b>"
     )
 
     for order in orders:
+
         (
             order_id,
             telegram_id,
@@ -1230,18 +1814,39 @@ async def admin_panel(
         ) = order
 
         if order_type == "STARS":
+
             product = f"{amount} Stars"
 
+        elif order_type == "STARS_OPTIMA":
+
+            product = f"{amount} Stars — Optima 24"
+
         elif order_type.startswith("PREMIUM_"):
+
             months = order_type.replace(
                 "PREMIUM_",
                 "",
             )
-            product = (
-                f"Premium {months} месяцев"
-            )
+
+            if months.endswith("_OPTIMA"):
+
+                months = months.replace(
+                    "_OPTIMA",
+                    "",
+                )
+
+                product = (
+                    f"Premium {months} месяцев — Optima 24"
+                )
+
+            else:
+
+                product = (
+                    f"Premium {months} месяцев"
+                )
 
         else:
+
             product = order_type
 
         await message.answer(
@@ -1259,17 +1864,24 @@ async def admin_panel(
         )
 
 
+# =========================================================
+# ADMIN COMPLETE
+# =========================================================
+
 @dp.callback_query(
     F.data.startswith("admin_complete:")
 )
 async def admin_complete(
     callback: CallbackQuery,
 ):
+
     if callback.from_user.id != ADMIN_ID:
+
         await callback.answer(
             "Нет доступа",
             show_alert=True,
         )
+
         return
 
     await callback.answer()
@@ -1278,15 +1890,18 @@ async def admin_complete(
         order_id = int(
             callback.data.split(":")[1]
         )
+
     except (ValueError, IndexError):
         return
 
     order = await get_order(order_id)
 
     if not order:
+
         await callback.message.answer(
             "❌ Заказ не найден."
         )
+
         return
 
     (
@@ -1303,10 +1918,12 @@ async def admin_complete(
     ) = order
 
     if status != "PROCESSING":
+
         await callback.message.answer(
             "⚠️ Этот заказ нельзя завершить.\n"
             f"Текущий статус: {status}"
         )
+
         return
 
     await set_order_status(
@@ -1315,6 +1932,7 @@ async def admin_complete(
     )
 
     try:
+
         await bot.send_message(
             telegram_id,
             f"✅ <b>Заказ №{order_id} выполнен!</b>\n\n"
@@ -1330,20 +1948,29 @@ async def admin_complete(
                 ]
             ),
         )
+
     except Exception as e:
+
         logging.warning(
             "User notification failed: %s",
             e,
         )
 
-    await callback.message.edit_reply_markup(
-        reply_markup=None
-    )
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=None
+        )
+    except Exception:
+        pass
 
     await callback.message.answer(
         f"✅ Заказ №<b>{order_id}</b> отмечен как выполненный."
     )
 
+
+# =========================================================
+# ADMIN REJECT
+# =========================================================
 
 @dp.callback_query(
     F.data.startswith("admin_reject:")
@@ -1351,28 +1978,35 @@ async def admin_complete(
 async def admin_reject(
     callback: CallbackQuery,
 ):
+
     if callback.from_user.id != ADMIN_ID:
+
         await callback.answer(
             "Нет доступа",
             show_alert=True,
         )
+
         return
 
     await callback.answer()
 
     try:
+
         order_id = int(
             callback.data.split(":")[1]
         )
+
     except (ValueError, IndexError):
         return
 
     order = await get_order(order_id)
 
     if not order:
+
         await callback.message.answer(
             "❌ Заказ не найден."
         )
+
         return
 
     (
@@ -1389,9 +2023,11 @@ async def admin_reject(
     ) = order
 
     if status != "PROCESSING":
+
         await callback.message.answer(
             "⚠️ Этот заказ уже обработан."
         )
+
         return
 
     await set_order_status(
@@ -1400,6 +2036,7 @@ async def admin_reject(
     )
 
     try:
+
         await bot.send_message(
             telegram_id,
             f"❌ <b>Заказ №{order_id} отклонён.</b>\n\n"
@@ -1422,15 +2059,20 @@ async def admin_reject(
                 ]
             ),
         )
+
     except Exception as e:
+
         logging.warning(
             "User notification failed: %s",
             e,
         )
 
-    await callback.message.edit_reply_markup(
-        reply_markup=None
-    )
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=None
+        )
+    except Exception:
+        pass
 
     await callback.message.answer(
         f"❌ Заказ №<b>{order_id}</b> отклонён."
@@ -1438,7 +2080,7 @@ async def admin_reject(
 
 
 # =========================================================
-# BACK BUTTONS
+# BACK
 # =========================================================
 
 @dp.callback_query(F.data == "back_main")
@@ -1446,6 +2088,7 @@ async def back_main(
     callback: CallbackQuery,
     state: FSMContext,
 ):
+
     await callback.answer()
 
     await state.clear()
@@ -1457,13 +2100,32 @@ async def back_main(
     )
 
 
+@dp.callback_query(F.data == "premium_back")
+async def premium_back(
+    callback: CallbackQuery,
+    state: FSMContext,
+):
+
+    await callback.answer()
+
+    await state.clear()
+
+    await callback.message.edit_text(
+        "💎 <b>Telegram Premium</b>\n\n"
+        "Выберите срок подписки:",
+        reply_markup=premium_keyboard(),
+    )
+
+
 @dp.callback_query(F.data == "support_inline")
 async def support_inline(
     callback: CallbackQuery,
 ):
+
     await callback.answer()
 
     if SUPPORT_USERNAME:
+
         username = SUPPORT_USERNAME.lstrip("@")
 
         await callback.message.answer(
@@ -1485,7 +2147,9 @@ async def support_inline(
                 ]
             ),
         )
+
     else:
+
         await callback.message.answer(
             "Поддержка пока не настроена.",
             reply_markup=main_menu(),
@@ -1493,7 +2157,7 @@ async def support_inline(
 
 
 # =========================================================
-# UNKNOWN COMMANDS / ERRORS
+# MENU
 # =========================================================
 
 @dp.message(Command("menu"))
@@ -1501,6 +2165,7 @@ async def menu_command(
     message: Message,
     state: FSMContext,
 ):
+
     await state.clear()
 
     await message.answer(
@@ -1514,6 +2179,7 @@ async def menu_command(
 # =========================================================
 
 async def main():
+
     await init_db()
 
     payment_task = asyncio.create_task(
@@ -1521,17 +2187,23 @@ async def main():
     )
 
     try:
-        logging.info("Starzo bot started")
+
+        logging.info(
+            "Starzo bot started"
+        )
 
         await dp.start_polling(
             bot
         )
 
     finally:
+
         payment_task.cancel()
 
         try:
+
             await payment_task
+
         except asyncio.CancelledError:
             pass
 
