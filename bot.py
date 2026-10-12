@@ -8,20 +8,19 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
-from aiogram import BaseMiddleware
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, FSInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 from config import BOT_TOKEN, CRYPTO_PAY_TOKEN, SUPPORT_USERNAME, ADMIN_ID
 from settings import USD_TO_KGS, STARS_BUY_RATE_USD, MIN_STARS, PREMIUM_PRICES_USD
-from database import init_db, create_order, set_crypto_invoice, get_order, get_user_orders, get_waiting_payment_orders, get_pending_admin_orders, set_order_status, register_user, get_all_user_ids
+from database import init_db, create_order, set_crypto_invoice, get_order, get_user_orders, get_waiting_payment_orders, get_pending_admin_orders, set_order_status
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("starzo")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не указан")
 if not CRYPTO_PAY_TOKEN:
-    raise RuntimeError("CRYPTO_PAY_TOKEN не указан")
+    log.warning("CRYPTO_PAY_TOKEN не указан: оплата Crypto Bot будет недоступна, но бот сможет запуститься для остальных функций.")
 if not ADMIN_ID:
     raise RuntimeError("ADMIN_ID не указан")
 ADMIN_ID = int(ADMIN_ID)
@@ -33,7 +32,8 @@ PREMIUM_PRICES_USD = {str(k): float(v) for k, v in PREMIUM_PRICES_USD.items()}
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 CRYPTO_API_URL = "https://pay.crypt.bot/api"
-OPTIMA_QR_PATH = "optima_qr.jpg"
+OPTIMA_ACCOUNT = "1090934711416531"
+OPTIMA_RECIPIENT = "Аким У."
 
 # We only track the last regular screen. Payment links and receipt messages are not deleted.
 last_screen: dict[int, tuple[int, int]] = {}
@@ -46,24 +46,6 @@ class OptimaReceiptState(StatesGroup):
     waiting_receipt = State()
 class RejectState(StatesGroup):
     waiting_reason = State()
-class BroadcastState(StatesGroup):
-    waiting_message = State()
-    waiting_confirmation = State()
-
-
-class UserRegistrationMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        user = getattr(event, "from_user", None)
-        if user and not getattr(user, "is_bot", False):
-            try:
-                await register_user(user.id, user.username, user.first_name)
-            except Exception:
-                log.exception("Не удалось сохранить пользователя %s", user.id)
-        return await handler(event, data)
-
-
-dp.message.outer_middleware(UserRegistrationMiddleware())
-dp.callback_query.outer_middleware(UserRegistrationMiddleware())
 
 
 def usd_to_kgs(amount):
@@ -194,16 +176,10 @@ def optima_text(order_id, product, price):
     return ("🏦 <b>Оплата через Optima 24</b>\n\n"
         f"Заказ №<b>{order_id}</b>\nТовар: <b>{esc(product)}</b>\n"
         f"К оплате: <b>{format_usd(price)}</b>\nСумма: <b>{format_kgs(price)}</b>\n\n"
-        "📲 <b>Отсканируйте QR-код ниже в приложении банка и оплатите точную сумму заказа.</b>\n\n"
+        "Переведите указанную сумму по реквизитам:\n\n"
+        f"🏦 Номер счёта: <code>{OPTIMA_ACCOUNT}</code>\n👤 Получатель: <b>{esc(OPTIMA_RECIPIENT)}</b>\n\n"
         "После оплаты нажмите «✅ Я оплатил» и отправьте фото/скриншот чека.\n"
-        "⚠️ Перед подтверждением проверьте сумму и получателя. Не отправляйте пароли или SMS-коды.")
-
-async def send_optima_payment(message, order_id, product, price):
-    await message.answer_photo(
-        photo=FSInputFile(OPTIMA_QR_PATH),
-        caption=optima_text(order_id, product, price),
-        reply_markup=optima_paid_keyboard(order_id),
-    )
+        "⚠️ Не отправляйте пароль, SMS-код или полные данные карты.")
 
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
@@ -300,7 +276,7 @@ async def create_stars_order(callback, state, method):
             f"Заказ №<b>{order_id}</b>\nКоличество: <b>{stars} Stars</b>\nСтоимость: <b>{format_usd(price)}</b>\nВ сомах: <b>{format_kgs(price)}</b>\n\n"
             "Оплатите счёт и нажмите «🔄 Проверить оплату». Чек Crypto Bot не требуется.", reply_markup=crypto_payment_keyboard(order_id, invoice["url"]))
     else:
-        await send_optima_payment(callback.message, order_id, f"{stars} Stars", price)
+        await callback.message.answer(optima_text(order_id, f"{stars} Stars", price), reply_markup=optima_paid_keyboard(order_id))
     await state.clear()
 
 @dp.callback_query(F.data == "stars_pay_crypto")
@@ -438,7 +414,7 @@ async def create_premium_order(callback, state, method):
             f"Стоимость: <b>{format_usd(price)}</b>\nВ сомах: <b>{format_kgs(price)}</b>\n\nОплатите счёт и нажмите «🔄 Проверить оплату». Чек Crypto Bot не требуется.",
             reply_markup=crypto_payment_keyboard(order_id, invoice["url"]))
     else:
-        await send_optima_payment(callback.message, order_id, product, price)
+        await callback.message.answer(optima_text(order_id, product, price), reply_markup=optima_paid_keyboard(order_id))
     await state.clear()
 
 @dp.callback_query(F.data == "premium_pay:crypto")
@@ -647,119 +623,6 @@ async def payment_checker():
             log.exception("Payment checker error")
         await asyncio.sleep(30)
 
-@dp.message(Command("broadcast"))
-async def broadcast_start(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    await state.clear()
-    await state.set_state(BroadcastState.waiting_message)
-    await message.answer(
-        "📣 <b>Рассылка Starzo</b>\n\n"
-        "Отправьте текст, который нужно разослать всем пользователям.\n"
-        "Для отмены отправьте /cancel."
-    )
-
-
-@dp.message(BroadcastState.waiting_message)
-async def broadcast_get_message(message: Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID:
-        return
-    if (message.text or "").strip() == "/cancel":
-        await state.clear()
-        await message.answer("❌ Рассылка отменена.")
-        return
-    text_to_send = (message.text or message.caption or "").strip()
-    if not text_to_send:
-        await message.answer("❌ Отправьте текстовое сообщение. Фото и другие файлы пока не поддерживаются.")
-        return
-    if len(text_to_send) > 3500:
-        await message.answer("❌ Сообщение слишком длинное. Сократите его до 3500 символов.")
-        return
-    await state.update_data(broadcast_text=text_to_send)
-    await state.set_state(BroadcastState.waiting_confirmation)
-    await message.answer(
-        "👀 <b>Предпросмотр рассылки</b>\n\n"
-        f"{esc(text_to_send)}\n\n"
-        "Отправить это сообщение всем пользователям Starzo?",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Отправить всем", callback_data="broadcast:confirm")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast:cancel")],
-        ])
-    )
-
-
-@dp.callback_query(F.data == "broadcast:cancel")
-async def broadcast_cancel(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    await callback.answer("Рассылка отменена")
-    await state.clear()
-    try:
-        await callback.message.edit_text("❌ Рассылка отменена.")
-    except Exception:
-        pass
-
-
-@dp.callback_query(F.data == "broadcast:confirm")
-async def broadcast_confirm(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    data = await state.get_data()
-    text_to_send = data.get("broadcast_text")
-    if not text_to_send:
-        await state.clear()
-        await callback.answer("Нет текста рассылки", show_alert=True)
-        return
-    await callback.answer("Рассылка запущена")
-    await state.clear()
-    try:
-        await callback.message.edit_text("📣 Рассылка началась. Это может занять некоторое время…")
-    except Exception:
-        pass
-
-    user_ids = await get_all_user_ids()
-    sent_count = 0
-    failed_count = 0
-    blocked_count = 0
-    for user_id in user_ids:
-        try:
-            await bot.send_message(
-                int(user_id),
-                f"📣 <b>Новости Starzo</b>\n\n{esc(text_to_send)}",
-                disable_web_page_preview=True,
-            )
-            sent_count += 1
-            await asyncio.sleep(0.05)
-        except Exception as exc:
-            failed_count += 1
-            error_text = str(exc).lower()
-            if "blocked" in error_text or "chat not found" in error_text or "deactivated" in error_text:
-                blocked_count += 1
-            log.info("Рассылка: не удалось отправить пользователю %s: %s", user_id, exc)
-
-    await bot.send_message(
-        ADMIN_ID,
-        "✅ <b>Рассылка завершена</b>\n\n"
-        f"👥 Пользователей в базе: <b>{len(user_ids)}</b>\n"
-        f"✅ Отправлено: <b>{sent_count}</b>\n"
-        f"❌ Не доставлено: <b>{failed_count}</b>\n"
-        f"🚫 Возможно, заблокировали бота: <b>{blocked_count}</b>"
-    )
-
-
-@dp.message(Command("cancel"))
-async def cancel_command(message: Message, state: FSMContext):
-    if message.from_user.id == ADMIN_ID and await state.get_state() in {
-        BroadcastState.waiting_message.state,
-        BroadcastState.waiting_confirmation.state,
-        RejectState.waiting_reason.state,
-    }:
-        await state.clear()
-        await message.answer("❌ Действие отменено.")
-
-
 @dp.message(Command("admin"))
 async def admin_panel(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -887,18 +750,32 @@ async def support_inline(callback: CallbackQuery):
         await callback.message.answer("Поддержка пока не настроена.", reply_markup=main_menu())
 
 async def main():
-    await init_db()  # Existing starzo.db and order history are preserved.
-    task = asyncio.create_task(payment_checker())
+    task = None
     try:
-        log.info("Starzo bot started")
-        await dp.start_polling(bot)
+        log.info("Starzo: initializing database (existing starzo.db will be preserved)")
+        await init_db()
+        # Validate Telegram token early, so a bad token appears clearly in logs.
+        me = await bot.get_me()
+        log.info("Telegram login successful: @%s (id=%s)", me.username, me.id)
+        task = asyncio.create_task(payment_checker(), name="starzo-payment-checker")
+        log.info("Starting aiogram polling")
+        await dp.start_polling(bot, close_bot_session=False)
+    except Exception:
+        log.exception("Starzo stopped because of an unhandled startup/runtime error")
+        raise
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                log.exception("Payment checker stopped with an error")
         await bot.session.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("Starzo stopped by KeyboardInterrupt")
