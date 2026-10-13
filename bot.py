@@ -25,7 +25,7 @@ if not ADMIN_ID:
     raise RuntimeError("ADMIN_ID не указан")
 ADMIN_ID = int(ADMIN_ID)
 USD_TO_KGS = float(USD_TO_KGS)
-STARS_BUY_RATE_USD = float(STARS_BUY_RATE_USD)
+STARS_BUY_RATE_USD = 1.89  # цена покупки за 100 Stars в USD
 MIN_STARS = int(MIN_STARS)
 PREMIUM_PRICES_USD = {str(k): float(v) for k, v in PREMIUM_PRICES_USD.items()}
 
