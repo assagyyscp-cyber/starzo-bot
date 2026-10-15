@@ -28,7 +28,7 @@ async def init_db():
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Existing buyers are added to the broadcast audience without changing orders.
+        # Import existing customers into the broadcast audience without changing orders.
         await db.execute("""
             INSERT OR IGNORE INTO users (telegram_id, username, first_seen, last_seen)
             SELECT telegram_id, username, MIN(created_at), MAX(created_at)
