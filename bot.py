@@ -1602,32 +1602,32 @@ async def optima_receipt(message: Message, state: FSMContext):
     )
 
 
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            "🏦 <b>Новая оплата через Optima 24!</b>\n\n"
-            f"Заказ №<b>{order_id}</b>\n"
-            f"Покупатель: <b>{esc(username)}</b>\n"
-            f"Telegram ID: <code>{telegram_id}</code>\n"
-            f"Товар: <b>{esc(product)}</b>\n"
-            f"Сумма: <b>{format_usd(price)} ({format_kgs(price)})</b>\n\n"
-            "Чек прикреплён следующим сообщением.",
-            reply_markup=admin_order_keyboard(order_id)
-        )
+        try:
         await bot.send_photo(
-            ADMIN_ID,
-            message.photo[-1].file_id,
+            chat_id=ADMIN_ID,
+            photo=message.photo[-1].file_id,
             caption=(
-                f"🧾 Чек заказа №{order_id}\n"
-                f"Покупатель: {esc(username)}\n"
-                f"Товар: {esc(product)}\n"
-                f"Сумма: {format_usd(price)} ({format_kgs(price)})"
-            )
+                "🏦 <b>Новая оплата через Optima 24!</b>\n\n"
+                f"Заказ №<b>{order_id}</b>\n"
+                f"Покупатель: <b>{esc(username or 'не указан')}</b>\n"
+                f"Telegram ID: <code>{telegram_id}</code>\n"
+                f"Товар: <b>{esc(product)}</b>\n"
+                f"Сумма: <b>{format_usd(price)} "
+                f"({format_kgs(price)})</b>\n\n"
+                "🧾 Чек об оплате прикреплён к этому сообщению."
+            ),
+            reply_markup=admin_order_keyboard(int(order_id))
         )
     except Exception:
-        log.exception("Не удалось отправить чек админу")
-
-    await state.clear()
+        log.exception(
+            "Не удалось отправить чек администратору: order_id=%s",
+            order_id
+        )
+        await message.answer(
+            "❌ Не удалось передать чек администратору. "
+            "Попробуйте отправить его ещё раз позже."
+        )
+        return
 
 
 # -------------------- ПРОДАЖА STARS --------------------
