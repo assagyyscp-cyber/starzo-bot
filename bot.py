@@ -1568,24 +1568,6 @@ async def optima_receipt(message: Message, state: FSMContext):
         "🧾 Чек об оплате прикреплён к этому сообщению."
     )
 
-    try:
-        await bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=message.photo[-1].file_id,
-            caption=admin_caption,
-            reply_markup=admin_order_keyboard(int(order_id))
-        )
-    except Exception:
-        log.exception(
-            "Не удалось отправить чек администратору: order_id=%s",
-            order_id
-        )
-        await message.answer(
-            "❌ Не удалось передать чек администратору. "
-            "Заказ пока не передан на проверку."
-        )
-        return
-
     await set_order_status(int(order_id), "PROCESSING")
     await state.clear()
 
