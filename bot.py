@@ -959,10 +959,17 @@ async def broadcast_preview(message: Message, state: FSMContext):
         broadcast_user_count=len(users),
     )
     try:
+        # copy_message не поддерживает reply_markup: сначала копируем материал,
+        # затем отдельным сообщением показываем кнопки подтверждения.
         await bot.copy_message(
             chat_id=message.chat.id,
             from_chat_id=message.chat.id,
             message_id=message.message_id,
+        )
+        await message.answer(
+            "📣 <b>Предпросмотр рассылки</b>\n\n"
+            f"👥 Получателей: <b>{len(users)}</b>\n\n"
+            "Проверьте материал выше и подтвердите отправку:",
             reply_markup=broadcast_confirm_keyboard(),
         )
     except Exception:
