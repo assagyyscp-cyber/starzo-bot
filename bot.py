@@ -3,7 +3,7 @@ import logging
 from html import escape
 
 import aiohttp
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
@@ -13,7 +13,9 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 
 from config import BOT_TOKEN, CRYPTO_PAY_TOKEN, SUPPORT_USERNAME, ADMIN_ID
 from settings import USD_TO_KGS, STARS_BUY_RATE_USD, MIN_STARS, PREMIUM_PRICES_USD
-from database import init_db, create_order, set_crypto_invoice, get_order, get_user_orders, get_waiting_payment_orders, get_pending_admin_orders, set_order_status
+from database import (init_db, create_order, set_crypto_invoice, get_order, get_user_orders,
+                      get_waiting_payment_orders, get_pending_admin_orders, set_order_status,
+                      register_user, get_all_user_ids)
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("starzo")
@@ -25,12 +27,56 @@ if not ADMIN_ID:
     raise RuntimeError("ADMIN_ID не указан")
 ADMIN_ID = int(ADMIN_ID)
 USD_TO_KGS = float(USD_TO_KGS)
-STARS_BUY_RATE_USD = 1.89  # цена покупки за 100 Stars в USD
+STARS_BUY_RATE_USD = float(STARS_BUY_RATE_USD)  # цена берётся из settings.py
 MIN_STARS = int(MIN_STARS)
-PREMIUM_PRICES_USD = {str(k): float(v) for k, v in PREMIUM_PRICES_USD.items()}
+PREMIUM_PRICES_USD = {"3": 14.00, "6": 21.99, "12": 33.00}
 
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+SUBSCRIPTION_CHANNEL = "@vukoul"
+SUBSCRIPTION_URL = "https://t.me/vukoul"
+
+class SubscriptionMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = data.get("event_from_user")
+        if not user:
+            return await handler(event, data)
+        # Keep the broadcast audience up to date. The users table is additive;
+        # existing orders and their history are not modified.
+        try:
+            await register_user(user.id, user.username, user.first_name)
+        except Exception:
+            log.exception("Не удалось сохранить пользователя для рассылки")
+        if user.id == ADMIN_ID:
+            return await handler(event, data)
+        # The check button must be allowed through so it can re-check membership.
+        if isinstance(event, CallbackQuery) and event.data == "check_subscription":
+            return await handler(event, data)
+        try:
+            member = await bot.get_chat_member(chat_id=SUBSCRIPTION_CHANNEL, user_id=user.id)
+            subscribed = member.status in ("member", "administrator", "creator") or (member.status == "restricted" and getattr(member, "is_member", False))
+        except Exception:
+            log.exception("Не удалось проверить подписку на %s", SUBSCRIPTION_CHANNEL)
+            subscribed = False
+        if subscribed:
+            return await handler(event, data)
+        markup = subscription_keyboard()
+        notice = ("🔒 <b>Чтобы пользоваться Starzo, подпишитесь на канал</b> "
+                  f'<a href="{SUBSCRIPTION_URL}">@vukoul</a>, затем нажмите «Проверить подписку».\n\n'
+                  "Если проверка не проходит, убедитесь, что бот добавлен администратором канала.")
+        try:
+            if isinstance(event, Message):
+                await event.answer(notice, reply_markup=markup)
+            elif isinstance(event, CallbackQuery):
+                await event.answer("Сначала подпишитесь на @vukoul", show_alert=True)
+                if event.message:
+                    await event.message.answer(notice, reply_markup=markup)
+        except Exception:
+            log.exception("Не удалось показать запрос подписки")
+        return None
+
+dp.message.outer_middleware(SubscriptionMiddleware())
+dp.callback_query.outer_middleware(SubscriptionMiddleware())
 CRYPTO_API_URL = "https://pay.crypt.bot/api"
 OPTIMA_ACCOUNT = "1090934711416531"
 OPTIMA_RECIPIENT = "Аким У."
@@ -40,12 +86,15 @@ last_screen: dict[int, tuple[int, int]] = {}
 
 class BuyStarsState(StatesGroup):
     waiting_amount = State()
+    waiting_gift_username = State()
 class PremiumState(StatesGroup):
     waiting_friend_username = State()
 class OptimaReceiptState(StatesGroup):
     waiting_receipt = State()
 class RejectState(StatesGroup):
     waiting_reason = State()
+class BroadcastState(StatesGroup):
+    waiting_message = State()
 
 
 def usd_to_kgs(amount):
@@ -67,6 +116,52 @@ def normalize_username(value):
     if not all(c.isascii() and (c.isalnum() or c == "_") for c in value):
         return ""
     return "@" + value
+
+
+def subscription_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться на канал", url=SUBSCRIPTION_URL)],
+        [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_subscription")],
+    ])
+
+
+def stars_target_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Купить себе", callback_data="stars_target:self")],
+        [InlineKeyboardButton(text="🎁 Подарить другу", callback_data="stars_target:gift")],
+        [InlineKeyboardButton(text="⬅️ В магазин", callback_data="back_main")],
+    ])
+
+
+def stars_gift_quantity_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="100 ⭐️", callback_data="buy_100"), InlineKeyboardButton(text="500 ⭐️", callback_data="buy_500")],
+        [InlineKeyboardButton(text="1000 ⭐️", callback_data="buy_1000"), InlineKeyboardButton(text="2000 ⭐️", callback_data="buy_2000")],
+        [InlineKeyboardButton(text="✏️ Другое количество", callback_data="buy_custom")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="stars_back_target")],
+    ])
+
+
+def stars_order_base(order_type):
+    return str(order_type or "").split(":", 1)[0]
+
+
+def stars_order_recipient(order_type):
+    parts = str(order_type or "").split(":", 1)
+    return parts[1] if len(parts) == 2 else None
+
+
+def stars_product(order_type, amount):
+    base = stars_order_base(order_type)
+    gift_recipient = stars_order_recipient(order_type)
+    is_optima = base.endswith("_OPTIMA")
+    if base.startswith("STARS_GIFT"):
+        product = f"{amount} Stars в подарок для {gift_recipient or 'получателя'}"
+    else:
+        product = f"{amount} Stars"
+    if is_optima:
+        product += " — Optima 24"
+    return product
 
 
 def main_menu():
@@ -93,9 +188,9 @@ def stars_payment_keyboard():
     ])
 def premium_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="3 месяца — $12.99", callback_data="premium_months:3")],
-        [InlineKeyboardButton(text="6 месяцев — $17.99", callback_data="premium_months:6")],
-        [InlineKeyboardButton(text="12 месяцев — $30.00", callback_data="premium_months:12")],
+        [InlineKeyboardButton(text=f"3 месяца — {format_usd(PREMIUM_PRICES_USD.get('3', 14.00))}", callback_data="premium_months:3")],
+        [InlineKeyboardButton(text=f"6 месяцев — {format_usd(PREMIUM_PRICES_USD.get('6', 21.99))}", callback_data="premium_months:6")],
+        [InlineKeyboardButton(text=f"12 месяцев — {format_usd(PREMIUM_PRICES_USD.get('12', 33.00))}", callback_data="premium_months:12")],
         [InlineKeyboardButton(text="⬅️ В магазин", callback_data="back_main")],
     ])
 def premium_target_keyboard():
@@ -181,6 +276,26 @@ def optima_text(order_id, product, price):
         "После оплаты нажмите «✅ Я оплатил» и отправьте фото/скриншот чека.\n"
         "⚠️ Не отправляйте пароль, SMS-код или полные данные карты.")
 
+@dp.callback_query(F.data == "check_subscription")
+async def check_subscription(callback: CallbackQuery, state: FSMContext):
+    try:
+        member = await bot.get_chat_member(chat_id=SUBSCRIPTION_CHANNEL, user_id=callback.from_user.id)
+        subscribed = member.status in ("member", "administrator", "creator") or (member.status == "restricted" and getattr(member, "is_member", False))
+    except Exception:
+        log.exception("Проверка подписки не удалась")
+        await callback.answer("Не удалось проверить подписку. Попробуйте позже.", show_alert=True)
+        return
+    if not subscribed:
+        await callback.answer("Вы ещё не подписались на @vukoul", show_alert=True)
+        return
+    await callback.answer("Подписка подтверждена!")
+    await state.clear()
+    try:
+        await callback.message.edit_text("✅ <b>Подписка подтверждена!</b>\n\nДобро пожаловать в Starzo. Выберите действие в меню ниже.")
+    except Exception:
+        pass
+    await callback.message.answer("🛍 <b>Магазин Starzo</b>", reply_markup=main_menu())
+
 @dp.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
@@ -199,7 +314,47 @@ async def buy_stars(message: Message, state: FSMContext):
         return
     await send_screen(message, "⭐️ <b>Покупка Telegram Stars</b>\n\n"
         f"Цена: <b>100 Stars = {format_usd(STARS_BUY_RATE_USD)}</b>\nЭто примерно <b>{format_kgs(STARS_BUY_RATE_USD)}</b>.\n"
-        f"Минимальная покупка — <b>{MIN_STARS} Stars</b>.\n\nВыберите количество:", buy_stars_keyboard())
+        f"Минимальная покупка — <b>{MIN_STARS} Stars</b>.\n\nКому покупаем Stars?", stars_target_keyboard())
+
+@dp.callback_query(F.data == "stars_target:self")
+async def stars_target_self(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not callback.from_user.username:
+        await state.clear()
+        await callback.message.answer("❌ Для покупки Stars необходимо установить Telegram username.", reply_markup=main_menu())
+        return
+    await state.update_data(stars_recipient=f"@{callback.from_user.username}", stars_gift=False)
+    await edit_or_answer(callback, "⭐️ <b>Выберите количество Stars для себя:</b>", buy_stars_keyboard())
+
+@dp.callback_query(F.data == "stars_target:gift")
+async def stars_target_gift(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not callback.from_user.username:
+        await state.clear()
+        await callback.message.answer("❌ Для покупки Stars необходимо установить собственный Telegram username.", reply_markup=main_menu())
+        return
+    await state.set_state(BuyStarsState.waiting_gift_username)
+    await edit_or_answer(callback, "🎁 <b>Подарить Stars другу</b>\n\nВведите username получателя, например <code>@username</code>.", inline_back("stars_back_target", "⬅️ Назад"))
+
+@dp.message(BuyStarsState.waiting_gift_username)
+async def stars_gift_username(message: Message, state: FSMContext):
+    target = normalize_username(message.text or "")
+    if not target:
+        await message.answer("❌ Неверный username. Введите @username (5–32 символа, латинские буквы, цифры или _).")
+        return
+    if not message.from_user.username:
+        await state.clear()
+        await message.answer("❌ Для покупки Stars необходимо установить собственный Telegram username.", reply_markup=main_menu())
+        return
+    await state.update_data(stars_recipient=target, stars_gift=True)
+    await state.set_state(None)
+    await message.answer(f"🎁 <b>Stars для {esc(target)}</b>\n\nВыберите количество:", reply_markup=buy_stars_keyboard())
+
+@dp.callback_query(F.data == "stars_back_target")
+async def stars_back_target(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(None)
+    await edit_or_answer(callback, "⭐️ <b>Кому покупаем Stars?</b>", stars_target_keyboard())
 
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy_callback(callback: CallbackQuery, state: FSMContext):
@@ -261,22 +416,29 @@ async def create_stars_order(callback, state, method):
         await callback.message.answer("❌ Сессия устарела. Начните покупку Stars заново.", reply_markup=main_menu())
         return
     price = int(stars) / 100 * STARS_BUY_RATE_USD
-    order_type = "STARS" if method == "Crypto Bot" else "STARS_OPTIMA"
+    recipient = data.get("stars_recipient") or f"@{buyer.username}"
+    is_gift = bool(data.get("stars_gift"))
+    base_type = "STARS_GIFT" if is_gift else "STARS"
+    if method != "Crypto Bot":
+        base_type += "_OPTIMA"
+    order_type = base_type + (f":{recipient}" if is_gift else "")
     order_id = await create_order(buyer.id, username_text(buyer), order_type, str(stars), price)
     if method == "Crypto Bot":
         try:
-            invoice = await attach_invoice(order_id, price, f"Starzo — покупка {stars} Telegram Stars")
+            invoice = await attach_invoice(order_id, price, f"Starzo — покупка {stars} Telegram Stars для {recipient}")
         except Exception:
             log.exception("Crypto invoice creation failed")
             await set_order_status(order_id, "PAYMENT_ERROR")
             await state.clear()
             await callback.message.answer("❌ Не удалось создать счёт Crypto Bot. Попробуйте позже.", reply_markup=main_menu())
             return
+        gift_line = f"\nПолучатель: <b>{esc(recipient)}</b>" if is_gift else ""
         await callback.message.answer("⭐️ <b>Заказ создан</b>\n\n"
-            f"Заказ №<b>{order_id}</b>\nКоличество: <b>{stars} Stars</b>\nСтоимость: <b>{format_usd(price)}</b>\nВ сомах: <b>{format_kgs(price)}</b>\n\n"
+            f"Заказ №<b>{order_id}</b>\nКоличество: <b>{stars} Stars</b>{gift_line}\nСтоимость: <b>{format_usd(price)}</b>\nВ сомах: <b>{format_kgs(price)}</b>\n\n"
             "Оплатите счёт и нажмите «🔄 Проверить оплату». Чек Crypto Bot не требуется.", reply_markup=crypto_payment_keyboard(order_id, invoice["url"]))
     else:
-        await callback.message.answer(optima_text(order_id, f"{stars} Stars", price), reply_markup=optima_paid_keyboard(order_id))
+        product = f"{stars} Stars для {recipient}" if is_gift else f"{stars} Stars"
+        await callback.message.answer(optima_text(order_id, product, price), reply_markup=optima_paid_keyboard(order_id))
     await state.clear()
 
 @dp.callback_query(F.data == "stars_pay_crypto")
@@ -468,8 +630,8 @@ async def optima_receipt(message: Message, state: FSMContext):
         await message.answer("⚠️ Этот заказ не принадлежит вам или уже обрабатывается.", reply_markup=main_menu())
         return
     await set_order_status(order_id, "PROCESSING")
-    if order_type == "STARS_OPTIMA":
-        product = f"{amount} Stars"
+    if stars_order_base(order_type).startswith("STARS"):
+        product = stars_product(order_type, amount)
     elif order_type.startswith("PREMIUM_"):
         months = order_type.removeprefix("PREMIUM_").removesuffix("_OPTIMA")
         product = f"Telegram Premium — {months} месяцев; получатель {amount}"
@@ -500,8 +662,8 @@ async def my_orders(message: Message, state: FSMContext):
     lines = ["📦 <b>Мои заказы</b>\n"]
     for row in orders[:20]:
         order_id, order_type, amount, price, status, created_at = row
-        if order_type in ("STARS", "STARS_OPTIMA"):
-            product = f"{amount} Stars" + (" — Optima 24" if order_type.endswith("_OPTIMA") else "")
+        if stars_order_base(order_type).startswith("STARS"):
+            product = stars_product(order_type, amount)
         elif order_type.startswith("PREMIUM_"):
             months = order_type.removeprefix("PREMIUM_").removesuffix("_OPTIMA")
             product = f"Premium на {months} месяцев; получатель {amount}" + (" — Optima 24" if order_type.endswith("_OPTIMA") else "")
@@ -541,9 +703,9 @@ async def process_crypto_paid_order(order_id):
     if status != "WAITING_PAYMENT":
         return False
     await set_order_status(order_id, "PROCESSING")
-    if order_type == "STARS":
-        product = f"{amount} Stars"
-        user_text = "Заказ оформлен! Stars поступят в течение 24 часов."
+    if stars_order_base(order_type).startswith("STARS"):
+        product = stars_product(order_type, amount)
+        user_text = "Заказ оформлен! Stars будут отправлены указанному получателю в течение 24 часов."
     elif order_type.startswith("PREMIUM_"):
         months = order_type.removeprefix("PREMIUM_")
         product = f"Telegram Premium — {months} месяцев; получатель {amount}"
@@ -634,8 +796,8 @@ async def admin_panel(message: Message):
     await message.answer(f"🛠 <b>Админ-панель</b>\n\nОжидают обработки: <b>{len(orders)}</b>")
     for row in orders:
         order_id, telegram_id, username, order_type, amount, price, status, invoice_id, invoice_url, created_at = row
-        if order_type in ("STARS", "STARS_OPTIMA"):
-            product = f"{amount} Stars" + (" — Optima 24" if order_type.endswith("_OPTIMA") else "")
+        if stars_order_base(order_type).startswith("STARS"):
+            product = stars_product(order_type, amount)
         elif order_type.startswith("PREMIUM_"):
             months = order_type.removeprefix("PREMIUM_").removesuffix("_OPTIMA")
             product = f"Premium {months} месяцев; получатель {amount}"
@@ -748,6 +910,132 @@ async def support_inline(callback: CallbackQuery):
         ]))
     else:
         await callback.message.answer("Поддержка пока не настроена.", reply_markup=main_menu())
+
+def broadcast_confirm_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить всем", callback_data="broadcast_send")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")],
+    ])
+
+
+@dp.message(Command("broadcast"))
+async def broadcast_start(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.clear()
+    await state.set_state(BroadcastState.waiting_message)
+    await message.answer(
+        "📣 <b>Рассылка Starzo</b>\n\n"
+        "Отправьте следующим сообщением текст, фото, видео или другой материал, который нужно разослать.\n"
+        "После этого бот покажет предпросмотр и попросит подтверждение.\n\n"
+        "Для отмены отправьте /cancel."
+    )
+
+
+@dp.message(Command("cancel"), BroadcastState.waiting_message)
+async def broadcast_cancel_command(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.clear()
+    await message.answer("❌ Рассылка отменена.")
+
+
+@dp.message(BroadcastState.waiting_message)
+async def broadcast_preview(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    if message.text and message.text.strip() == "/cancel":
+        await state.clear()
+        await message.answer("❌ Рассылка отменена.")
+        return
+    users = await get_all_user_ids()
+    if not users:
+        await state.clear()
+        await message.answer("Пока нет пользователей для рассылки. Пользователи попадут в список после запуска бота.")
+        return
+    await state.update_data(
+        broadcast_chat_id=message.chat.id,
+        broadcast_message_id=message.message_id,
+        broadcast_user_count=len(users),
+    )
+    try:
+        await bot.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+            reply_markup=broadcast_confirm_keyboard(),
+        )
+    except Exception:
+        log.exception("Не удалось показать предпросмотр рассылки")
+        await state.clear()
+        await message.answer("❌ Не удалось создать предпросмотр. Попробуйте отправить другое сообщение.")
+        return
+    await state.set_state(None)
+
+
+@dp.callback_query(F.data == "broadcast_cancel")
+async def broadcast_cancel_callback(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    await state.clear()
+    await callback.answer("Рассылка отменена")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer("❌ Рассылка отменена.")
+
+
+@dp.callback_query(F.data == "broadcast_send")
+async def broadcast_send(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    data = await state.get_data()
+    source_chat_id = data.get("broadcast_chat_id")
+    source_message_id = data.get("broadcast_message_id")
+    if not source_chat_id or not source_message_id:
+        await state.clear()
+        await callback.answer("Предпросмотр устарел. Начните заново через /broadcast", show_alert=True)
+        return
+    await callback.answer("Рассылка началась")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    user_ids = await get_all_user_ids()
+    sent_count = 0
+    failed_count = 0
+    status_message = await callback.message.answer(
+        f"📣 <b>Рассылка выполняется…</b>\nПолучателей: {len(user_ids)}"
+    )
+    for user_id in user_ids:
+        try:
+            await bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=source_chat_id,
+                message_id=source_message_id,
+            )
+            sent_count += 1
+        except Exception as exc:
+            failed_count += 1
+            log.info("Рассылка не доставлена user_id=%s: %s", user_id, exc)
+        await asyncio.sleep(0.04)
+    await state.clear()
+    try:
+        await status_message.edit_text(
+            "✅ <b>Рассылка завершена</b>\n\n"
+            f"👥 Получателей в списке: <b>{len(user_ids)}</b>\n"
+            f"✅ Успешно отправлено: <b>{sent_count}</b>\n"
+            f"⚠️ Не доставлено: <b>{failed_count}</b>\n\n"
+            "Пользователи, заблокировавшие бота, обычно попадают в число недоставленных."
+        )
+    except Exception:
+        await callback.message.answer(
+            f"Рассылка завершена. Успешно: {sent_count}; не доставлено: {failed_count}."
+        )
+
 
 async def main():
     task = None
