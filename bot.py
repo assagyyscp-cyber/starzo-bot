@@ -1499,6 +1499,7 @@ async def optima_paid(callback: CallbackQuery, state: FSMContext):
 
 
 
+
 @dp.message(OptimaReceiptState.waiting_receipt)
 async def optima_receipt(message: Message, state: FSMContext):
     if not message.photo:
@@ -1514,7 +1515,7 @@ async def optima_receipt(message: Message, state: FSMContext):
         await state.clear()
         await message.answer(
             "❌ Сессия оформления чека устарела. "
-            "Откройте заказ и нажмите «✅ Я оплатил» заново.",
+            "Нажмите «✅ Я оплатил» заново.",
             reply_markup=main_menu()
         )
         return
@@ -1567,8 +1568,6 @@ async def optima_receipt(message: Message, state: FSMContext):
         "🧾 Чек об оплате прикреплён к этому сообщению."
     )
 
-    # Сначала отправляем администратору одно сообщение:
-    # фото чека + описание заказа + кнопки управления.
     try:
         await bot.send_photo(
             chat_id=ADMIN_ID,
@@ -1583,14 +1582,11 @@ async def optima_receipt(message: Message, state: FSMContext):
         )
         await message.answer(
             "❌ Не удалось передать чек администратору. "
-            "Пожалуйста, попробуйте отправить его ещё раз позже. "
             "Заказ пока не передан на проверку."
         )
         return
 
-    # Меняем статус только после успешной отправки сообщения админу.
     await set_order_status(int(order_id), "PROCESSING")
-
     await state.clear()
 
     await message.answer(
@@ -1600,6 +1596,7 @@ async def optima_receipt(message: Message, state: FSMContext):
         "в течение 24 часов.",
         reply_markup=main_menu()
     )
+
 
 
         try:
