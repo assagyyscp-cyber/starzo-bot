@@ -1461,6 +1461,7 @@ async def premium_optima(callback: CallbackQuery, state: FSMContext):
 
 # -------------------- OPTIMA 24: ЧЕК --------------------
 
+
 @dp.callback_query(F.data.startswith("optima_paid:"))
 async def optima_paid(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -1481,7 +1482,7 @@ async def optima_paid(callback: CallbackQuery, state: FSMContext):
         invoice_id, invoice_url, created_at
     ) = order
 
-    if telegram_id != callback.from_user.id:
+    if int(telegram_id) != int(callback.from_user.id):
         await callback.message.answer("❌ Этот заказ вам не принадлежит.")
         return
 
@@ -1491,13 +1492,12 @@ async def optima_paid(callback: CallbackQuery, state: FSMContext):
 
     await state.set_state(OptimaReceiptState.waiting_receipt)
     await state.update_data(optima_order_id=order_id)
+
     await callback.message.answer(
         "🧾 <b>Отправьте чек</b>\n\n"
         "Пришлите фото или скриншот подтверждения оплаты через Optima 24.\n"
         "Без чека заказ не будет принят."
     )
-
-
 
 
 @dp.message(OptimaReceiptState.waiting_receipt)
@@ -1520,7 +1520,8 @@ async def optima_receipt(message: Message, state: FSMContext):
         )
         return
 
-    order = await get_order(int(order_id))
+    order_id = int(order_id)
+    order = await get_order(order_id)
 
     if not order:
         await state.clear()
@@ -1535,13 +1536,18 @@ async def optima_receipt(message: Message, state: FSMContext):
         invoice_id, invoice_url, created_at
     ) = order
 
-    if (
-        int(telegram_id) != int(message.from_user.id)
-        or status != "WAITING_PAYMENT"
-    ):
+    if int(telegram_id) != int(message.from_user.id):
         await state.clear()
         await message.answer(
-            "⚠️ Заказ уже обрабатывается или не принадлежит вам.",
+            "❌ Этот заказ не принадлежит вам.",
+            reply_markup=main_menu()
+        )
+        return
+
+    if status != "WAITING_PAYMENT":
+        await state.clear()
+        await message.answer(
+            "⚠️ Этот заказ уже обрабатывается.",
             reply_markup=main_menu()
         )
         return
@@ -1568,7 +1574,28 @@ async def optima_receipt(message: Message, state: FSMContext):
         "🧾 Чек об оплате прикреплён к этому сообщению."
     )
 
-    await set_order_status(int(order_id), "PROCESSING")
+    # Сначала передаём фото и детали заказа администратору.
+    # Только после успешной отправки меняем статус заказа.
+    try:
+        await bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=message.photo[-1].file_id,
+            caption=admin_caption,
+            reply_markup=admin_order_keyboard(order_id)
+        )
+    except Exception:
+        log.exception(
+            "Не удалось отправить чек администратору: order_id=%s",
+            order_id
+        )
+        await message.answer(
+            "❌ Не удалось передать чек администратору. "
+            "Заказ не отправлен на проверку. "
+            "Попробуйте отправить чек ещё раз позже."
+        )
+        return
+
+    await set_order_status(order_id, "PROCESSING")
     await state.clear()
 
     await message.answer(
@@ -1579,34 +1606,6 @@ async def optima_receipt(message: Message, state: FSMContext):
         reply_markup=main_menu()
     )
 
-
-
-        try:
-        await bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=message.photo[-1].file_id,
-            caption=(
-                "🏦 <b>Новая оплата через Optima 24!</b>\n\n"
-                f"Заказ №<b>{order_id}</b>\n"
-                f"Покупатель: <b>{esc(username or 'не указан')}</b>\n"
-                f"Telegram ID: <code>{telegram_id}</code>\n"
-                f"Товар: <b>{esc(product)}</b>\n"
-                f"Сумма: <b>{format_usd(price)} "
-                f"({format_kgs(price)})</b>\n\n"
-                "🧾 Чек об оплате прикреплён к этому сообщению."
-            ),
-            reply_markup=admin_order_keyboard(int(order_id))
-        )
-    except Exception:
-        log.exception(
-            "Не удалось отправить чек администратору: order_id=%s",
-            order_id
-        )
-        await message.answer(
-            "❌ Не удалось передать чек администратору. "
-            "Попробуйте отправить его ещё раз позже."
-        )
-        return
 
 
 # -------------------- ПРОДАЖА STARS --------------------
