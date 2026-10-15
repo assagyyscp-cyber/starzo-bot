@@ -87,6 +87,7 @@ last_screen: dict[int, tuple[int, int]] = {}
 class BuyStarsState(StatesGroup):
     waiting_amount = State()
     waiting_gift_username = State()
+    waiting_post_link = State()
 class PremiumState(StatesGroup):
     waiting_friend_username = State()
 class OptimaReceiptState(StatesGroup):
@@ -153,10 +154,14 @@ def stars_order_recipient(order_type):
 
 def stars_product(order_type, amount):
     base = stars_order_base(order_type)
-    gift_recipient = stars_order_recipient(order_type)
+    recipient_or_link = stars_order_recipient(order_type)
     is_optima = base.endswith("_OPTIMA")
-    if base.startswith("STARS_GIFT"):
-        product = f"{amount} Stars в подарок для {gift_recipient or 'получателя'}"
+    if base.startswith("STARS_POST"):
+        product = f"{amount} Stars на пост"
+        if recipient_or_link:
+            product += f" ({recipient_or_link})"
+    elif base.startswith("STARS_GIFT"):
+        product = f"{amount} Stars в подарок для {recipient_or_link or 'получателя'}"
     else:
         product = f"{amount} Stars"
     if is_optima:
@@ -166,9 +171,10 @@ def stars_product(order_type, amount):
 
 def main_menu():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="⭐️ Купить Stars"), KeyboardButton(text="💰 Продать Stars")],
-        [KeyboardButton(text="💎 Premium"), KeyboardButton(text="📦 Мои заказы")],
-        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="💬 Поддержка")],
+        [KeyboardButton(text="⭐️ Купить Stars"), KeyboardButton(text="⭐️ Звезды на пост")],
+        [KeyboardButton(text="💰 Продать Stars"), KeyboardButton(text="💎 Premium")],
+        [KeyboardButton(text="📦 Мои заказы"), KeyboardButton(text="👤 Профиль")],
+        [KeyboardButton(text="💬 Поддержка")],
     ], resize_keyboard=True)
 
 def inline_back(data="back_main", label="⬅️ В магазин"):
@@ -185,6 +191,21 @@ def stars_payment_keyboard():
         [InlineKeyboardButton(text="🤖 Crypto Bot", callback_data="stars_pay_crypto")],
         [InlineKeyboardButton(text="🏦 Optima 24", callback_data="stars_pay_optima")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="stars_back_amount")],
+    ])
+def post_stars_quantity_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="50 ⭐️", callback_data="post_stars_amount:50"), InlineKeyboardButton(text="100 ⭐️", callback_data="post_stars_amount:100")],
+        [InlineKeyboardButton(text="500 ⭐️", callback_data="post_stars_amount:500"), InlineKeyboardButton(text="1000 ⭐️", callback_data="post_stars_amount:1000")],
+        [InlineKeyboardButton(text="2000 ⭐️", callback_data="post_stars_amount:2000")],
+        [InlineKeyboardButton(text="✏️ Другое количество", callback_data="post_stars_custom")],
+        [InlineKeyboardButton(text="⬅️ В магазин", callback_data="back_main")],
+    ])
+
+def post_stars_payment_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤖 Crypto Bot", callback_data="post_stars_pay_crypto")],
+        [InlineKeyboardButton(text="🏦 Optima 24", callback_data="post_stars_pay_optima")],
+        [InlineKeyboardButton(text="⬅️ В магазин", callback_data="back_main")],
     ])
 def premium_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -306,6 +327,126 @@ async def menu_cmd(message: Message, state: FSMContext):
     await state.clear()
     await send_screen(message, "🛍 <b>Магазин Starzo</b>\n\nВыберите нужное действие:", main_menu())
 
+@dp.message(F.text == "⭐️ Звезды на пост")
+async def post_stars_start(message: Message, state: FSMContext):
+    await state.clear()
+    if not message.from_user.username:
+        await send_screen(message, "❌ <b>Покупка недоступна без Telegram username.</b>\\n\\nУстановите username в настройках Telegram и попробуйте снова.", main_menu())
+        return
+    await state.update_data(post_stars_mode=True)
+    await send_screen(
+        message,
+        "⭐️ <b>Звёзды на пост</b>\\n\\n"
+        "⚠️ <b>В канале должны быть включены реакции звёздами, иначе @invotex не сможет поставить их на пост.</b>\\n\\n"
+        f"Курс: <b>100 ⭐️ = {format_usd(STARS_BUY_RATE_USD)}</b> ({format_kgs(STARS_BUY_RATE_USD)}).\\n"
+        "Минимум — <b>50 ⭐️</b>. Выберите количество:",
+        post_stars_quantity_keyboard(),
+    )
+
+@dp.callback_query(F.data.startswith("post_stars_amount:"))
+async def post_stars_choose_amount(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not callback.from_user.username:
+        await state.clear()
+        await callback.message.answer("❌ Установите Telegram username для оформления заказа.", reply_markup=main_menu())
+        return
+    try:
+        stars = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.message.answer("❌ Некорректное количество.")
+        return
+    if stars < 50:
+        await callback.message.answer("❌ Минимум — 50 ⭐️.")
+        return
+    await state.update_data(stars=stars, post_stars_mode=True)
+    await state.set_state(BuyStarsState.waiting_post_link)
+    await edit_or_answer(callback, f"🔗 <b>Отправьте прямую ссылку на конкретный пост</b>, куда нужно поставить <b>{stars} ⭐️</b>.\\n\\nПример: <code>https://t.me/channel/123</code>\\n\\nСсылка на канал без номера поста не подойдёт.", inline_back("back_main"))
+
+@dp.callback_query(F.data == "post_stars_custom")
+async def post_stars_custom(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not callback.from_user.username:
+        await state.clear()
+        await callback.message.answer("❌ Установите Telegram username для оформления заказа.", reply_markup=main_menu())
+        return
+    await state.update_data(post_stars_mode=True)
+    await state.set_state(BuyStarsState.waiting_amount)
+    await edit_or_answer(callback, "✏️ Введите количество звёзд для поста. Минимум — <b>50 ⭐️</b>.", inline_back("back_main"))
+
+@dp.message(BuyStarsState.waiting_post_link)
+async def post_stars_get_link(message: Message, state: FSMContext):
+    link = (message.text or "").strip()
+    valid_prefix = link.startswith(("https://t.me/", "http://t.me/", "https://telegram.me/"))
+    parts = link.rstrip("/").split("/")
+    if not valid_prefix or len(parts) < 5 or not parts[-1].isdigit():
+        await message.answer("❌ Нужна прямая ссылка на конкретный пост, например <code>https://t.me/channel/123</code>. Ссылка только на канал не подойдёт.")
+        return
+    data = await state.get_data()
+    stars = int(data.get("stars", 0) or 0)
+    if stars < 50:
+        await state.clear()
+        await message.answer("❌ Сессия устарела. Начните оформление заново.", reply_markup=main_menu())
+        return
+    await state.update_data(post_link=link)
+    price = stars / 100 * STARS_BUY_RATE_USD
+    await state.set_state(None)
+    await message.answer(
+        "🧾 <b>Проверьте заказ</b>\\n\\n"
+        f"Товар: <b>{stars} ⭐️ на пост</b>\\n"
+        f"Ссылка на пост: {esc(link)}\\n"
+        f"Стоимость: <b>{format_usd(price)}</b> ({format_kgs(price)})\\n\\n"
+        "⚠️ Убедитесь, что в канале включены реакции звёздами.\\nВыберите способ оплаты:",
+        reply_markup=post_stars_payment_keyboard(),
+    )
+
+async def create_post_stars_order(callback: CallbackQuery, state: FSMContext, method: str):
+    buyer = callback.from_user
+    data = await state.get_data()
+    stars = int(data.get("stars", 0) or 0)
+    link = (data.get("post_link") or "").strip()
+    if not buyer.username:
+        await state.clear()
+        await callback.message.answer("❌ Установите Telegram username для оформления заказа.", reply_markup=main_menu())
+        return
+    parts = link.rstrip("/").split("/")
+    if stars < 50 or not link.startswith(("https://t.me/", "http://t.me/", "https://telegram.me/")) or len(parts) < 5 or not parts[-1].isdigit():
+        await state.clear()
+        await callback.message.answer("❌ Не найдены количество или ссылка на пост. Начните заказ заново.", reply_markup=main_menu())
+        return
+    price = stars / 100 * STARS_BUY_RATE_USD
+    order_type = ("STARS_POST" if method == "Crypto Bot" else "STARS_POST_OPTIMA") + ":" + link
+    order_id = await create_order(buyer.id, username_text(buyer), order_type, str(stars), price)
+    if method == "Crypto Bot":
+        try:
+            invoice = await attach_invoice(order_id, price, f"Starzo — {stars} Stars на пост")
+        except Exception:
+            log.exception("Crypto invoice creation failed for post Stars")
+            await set_order_status(order_id, "PAYMENT_ERROR")
+            await state.clear()
+            await callback.message.answer("❌ Не удалось создать счёт Crypto Bot. Попробуйте позже.", reply_markup=main_menu())
+            return
+        await callback.message.answer(
+            "⭐️ <b>Заказ «Звёзды на пост» создан</b>\\n\\n"
+            f"Заказ №<b>{order_id}</b>\\nКоличество: <b>{stars} ⭐️</b>\\n"
+            f"Пост: {esc(link)}\\nСтоимость: <b>{format_usd(price)}</b> ({format_kgs(price)})\\n\\n"
+            "Оплатите счёт и нажмите «🔄 Проверить оплату».",
+            reply_markup=crypto_payment_keyboard(order_id, invoice["url"]),
+        )
+    else:
+        await callback.message.answer(optima_text(order_id, f"{stars} Stars на пост: {link}", price), reply_markup=optima_paid_keyboard(order_id))
+    await state.clear()
+
+@dp.callback_query(F.data == "post_stars_pay_crypto")
+async def post_stars_pay_crypto(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await create_post_stars_order(callback, state, "Crypto Bot")
+
+@dp.callback_query(F.data == "post_stars_pay_optima")
+async def post_stars_pay_optima(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await create_post_stars_order(callback, state, "Optima 24")
+
+
 @dp.message(F.text == "⭐️ Купить Stars")
 async def buy_stars(message: Message, state: FSMContext):
     await state.clear()
@@ -385,14 +526,24 @@ async def custom_stars(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите количество Stars целым числом, например 300.")
         return
-    if stars < MIN_STARS:
-        await message.answer(f"❌ Минимальная покупка — {MIN_STARS} Stars.")
+    data = await state.get_data()
+    post_mode = bool(data.get("post_stars_mode"))
+    minimum = 50 if post_mode else MIN_STARS
+    if stars < minimum:
+        await message.answer(f"❌ Минимальная покупка — {minimum} Stars.")
         return
     if not message.from_user.username:
         await state.clear()
         await message.answer("❌ Для покупки Stars необходимо установить Telegram username.", reply_markup=main_menu())
         return
     await state.update_data(stars=stars)
+    if post_mode:
+        await state.set_state(BuyStarsState.waiting_post_link)
+        await message.answer(
+            f"🔗 Отправьте прямую ссылку на конкретный пост для {stars} ⭐️.\\n\\n"
+            "Пример: <code>https://t.me/channel/123</code>. Ссылка только на канал не подойдёт."
+        )
+        return
     await state.set_state(None)
     price = stars / 100 * STARS_BUY_RATE_USD
     await message.answer(f"⭐️ <b>{stars} Stars</b>\n\nСтоимость: <b>{format_usd(price)}</b>\nВ сомах: <b>{format_kgs(price)}</b>\n\nВыберите способ оплаты:", reply_markup=stars_payment_keyboard())
@@ -705,7 +856,10 @@ async def process_crypto_paid_order(order_id):
     await set_order_status(order_id, "PROCESSING")
     if stars_order_base(order_type).startswith("STARS"):
         product = stars_product(order_type, amount)
-        user_text = "Заказ оформлен! Stars будут отправлены указанному получателю в течение 24 часов."
+        if stars_order_base(order_type).startswith("STARS_POST"):
+            user_text = "Заказ оформлен! Звёзды будут поставлены на указанный пост в течение 24 часов."
+        else:
+            user_text = "Заказ оформлен! Stars будут отправлены указанному получателю в течение 24 часов."
     elif order_type.startswith("PREMIUM_"):
         months = order_type.removeprefix("PREMIUM_")
         product = f"Telegram Premium — {months} месяцев; получатель {amount}"
@@ -959,17 +1113,10 @@ async def broadcast_preview(message: Message, state: FSMContext):
         broadcast_user_count=len(users),
     )
     try:
-        # copy_message не поддерживает reply_markup: сначала копируем материал,
-        # затем отдельным сообщением показываем кнопки подтверждения.
         await bot.copy_message(
             chat_id=message.chat.id,
             from_chat_id=message.chat.id,
             message_id=message.message_id,
-        )
-        await message.answer(
-            "📣 <b>Предпросмотр рассылки</b>\n\n"
-            f"👥 Получателей: <b>{len(users)}</b>\n\n"
-            "Проверьте материал выше и подтвердите отправку:",
             reply_markup=broadcast_confirm_keyboard(),
         )
     except Exception:
